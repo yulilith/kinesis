@@ -1,14 +1,16 @@
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 from state import AgentConfig, AgentMemory
 
 
 class PostureAgent:
-    def __init__(self, tools, config: AgentConfig | None = None):
+    def __init__(self, tools, config: AgentConfig | None = None, llm_reasoner=None, logger=None):
         self.tools = tools
         self.config = config or AgentConfig()
         self.memory = AgentMemory()
+        self.llm_reasoner = llm_reasoner
+        self.logger = logger
 
     def in_cooldown(self) -> bool:
         if self.memory.last_feedback_time <= 0:
@@ -34,12 +36,14 @@ class PostureAgent:
             "raw": features,
         }
 
-    def decide_and_act(self, interp: Dict) -> None:
+    def decide_and_act(self, interp: Dict) -> str:
+        action_taken = "none"
+
         if self.memory.state == "normal":
             if interp["persistent_deviation_candidate"] and not self.in_cooldown():
                 self.memory.state = "candidate_deviation"
                 self.memory.candidate_count = 1
-            return
+            return action_taken
 
         if self.memory.state == "candidate_deviation":
             if interp["persistent_deviation_candidate"] and not self.in_cooldown():
@@ -49,7 +53,7 @@ class PostureAgent:
             else:
                 self.memory.state = "normal"
                 self.memory.candidate_count = 0
-            return
+            return action_taken
 
         if self.memory.state == "intervening":
             self.tools.trigger_vibration(
@@ -60,22 +64,57 @@ class PostureAgent:
             self.memory.last_feedback_time = time.time()
             self.memory.state = "cooldown"
             self.memory.candidate_count = 0
-            return
+            action_taken = "trigger_vibration"
+            return action_taken
 
         if self.memory.state == "cooldown":
             if not self.in_cooldown():
                 self.memory.state = "normal"
-            return
+            return action_taken
+
+        return action_taken
+
+    def get_memory_dict(self) -> Dict:
+        return {
+            "state": self.memory.state,
+            "candidate_count": self.memory.candidate_count,
+            "last_feedback_time": self.memory.last_feedback_time,
+            "in_cooldown": self.in_cooldown(),
+        }
 
     def step(self) -> None:
         snapshot = self.tools.get_current_state_snapshot(window_ms=self.config.window_ms)
         interp = self.interpret(snapshot)
+        action_taken = self.decide_and_act(interp)
 
         print(
             f"[Agent] state={self.memory.state:>18} | "
             f"tilt={interp['mean_tilt_deg']:+6.2f} deg | "
             f"dev={interp['deviation_deg']:5.2f} | "
-            f"still={interp['stillness_score']:.2f}"
+            f"still={interp['stillness_score']:.2f} | "
+            f"action={action_taken}"
         )
 
-        self.decide_and_act(interp)
+        reasoning = None
+        if self.llm_reasoner is not None:
+            reasoning = self.llm_reasoner.explain(
+                snapshot=snapshot,
+                interp=interp,
+                memory=self.get_memory_dict(),
+                action_taken=action_taken,
+            )
+            print("[LLM LOG]")
+            print(f"  summary: {reasoning.get('summary')}")
+            print(f"  body_state: {reasoning.get('body_state')}")
+            print(f"  rationale: {reasoning.get('decision_rationale')}")
+            print(f"  next_focus: {reasoning.get('next_focus')}")
+            print(f"  confidence: {reasoning.get('confidence')}")
+
+        if self.logger is not None:
+            self.logger.log_step(
+                snapshot=snapshot,
+                interpretation=interp,
+                memory=self.get_memory_dict(),
+                action_taken=action_taken,
+                reasoning=reasoning,
+            )

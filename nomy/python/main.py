@@ -1,11 +1,10 @@
-# 程序入口。先校准 baseline，然后开始 agent loop。
-# 你可以用硬件串口，也可以先用 mock 跑通。
-
 import argparse
 import time
 
 from agent import PostureAgent
 from bridge import ESP32Bridge, MockBridge
+from llm_reasoner import LLMReasoner
+from logger import JsonlLogger
 from state import AgentConfig
 from tools import BodyTools
 
@@ -14,7 +13,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mock", action="store_true", help="Use mock IMU stream instead of real ESP32")
     parser.add_argument("--port", type=str, default="/dev/ttyUSB0", help="Serial port for ESP32")
+    parser.add_argument("--no-llm", action="store_true", help="Disable LLM reasoning layer")
+    parser.add_argument("--model", type=str, default="gpt-5-mini", help="OpenAI model name")
+    parser.add_argument("--log-dir", type=str, default="logs", help="Directory for JSONL logs")
     args = parser.parse_args()
+
+    logger = JsonlLogger(log_dir=args.log_dir)
+    logger.log_event("run_started", {
+        "mock": args.mock,
+        "port": args.port,
+        "llm_enabled": not args.no_llm,
+        "model": args.model,
+    })
 
     if args.mock:
         bridge = MockBridge()
@@ -32,6 +42,16 @@ def main():
     print("[Main] Calibrating neutral baseline... Please stay in neutral posture.")
     baseline = tools.set_neutral_baseline(window_ms=1500)
     print(f"[Main] Baseline set: {baseline}")
+    logger.log_event("baseline_set", baseline)
+
+    llm_reasoner = None
+    if not args.no_llm:
+        llm_reasoner = LLMReasoner(model=args.model, enabled=True)
+        print("[Main] LLM reasoning layer enabled")
+        logger.log_event("llm_enabled", {"model": args.model})
+    else:
+        print("[Main] LLM reasoning layer disabled")
+        logger.log_event("llm_disabled", {})
 
     config = AgentConfig(
         window_ms=1000,
@@ -43,7 +63,23 @@ def main():
         vibration_intensity=0.55,
         vibration_duration_ms=300,
     )
-    agent = PostureAgent(tools, config=config)
+    logger.log_event("agent_config", {
+        "window_ms": config.window_ms,
+        "step_interval_sec": config.step_interval_sec,
+        "deviation_threshold_deg": config.deviation_threshold_deg,
+        "min_stillness_score": config.min_stillness_score,
+        "confirm_steps": config.confirm_steps,
+        "cooldown_sec": config.cooldown_sec,
+        "vibration_intensity": config.vibration_intensity,
+        "vibration_duration_ms": config.vibration_duration_ms,
+    })
+
+    agent = PostureAgent(
+        tools,
+        config=config,
+        llm_reasoner=llm_reasoner,
+        logger=logger,
+    )
 
     try:
         while True:
@@ -51,6 +87,7 @@ def main():
             time.sleep(config.step_interval_sec)
     except KeyboardInterrupt:
         print("\n[Main] Stopping...")
+        logger.log_event("run_stopped", {"reason": "keyboard_interrupt"})
     finally:
         bridge.stop()
 
