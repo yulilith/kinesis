@@ -5,11 +5,11 @@
 #include <Wire.h>
 
 // WiFi设置 - 请修改为你的网络
-const char* ssid = "YOUR_WIFI_NAME";
-const char* password = "YOUR_WIFI_PASSWORD";
+const char* ssid = "JianingsiPhone";
+const char* password = "020210yjn2019";
 
 // AI服务器设置 - 请修改为树莓派IP
-const char* ai_server_ip = "192.168.1.100";
+const char* ai_server_ip = "10.189.63.255";
 const int ai_server_port = 8080;
 
 // 硬件引脚定义
@@ -135,18 +135,21 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
             break;
             
         case WStype_CONNECTED:
-            Serial.printf("❤️ 连接到AI大脑: %s\n", payload);
+            Serial.print("❤️ 连接到AI大脑: ");
+            Serial.println((char*)payload);
             digitalWrite(LED_PIN, HIGH);
             webSocket.sendTXT("{\"event\":\"agent_connected\",\"device\":\"esp32_posture_monitor\"}");
             break;
             
         case WStype_TEXT:
-            Serial.printf("🧠 AI指令: %s\n", payload);
+            Serial.print("🧠 AI指令: ");
+            Serial.println((char*)payload);
             processAICommand((char*)payload);
             break;
             
         case WStype_ERROR:
-            Serial.printf("❌ WebSocket错误: %s\n", payload);
+            Serial.print("❌ WebSocket错误: ");
+            Serial.println((char*)payload);
             break;
             
         default:
