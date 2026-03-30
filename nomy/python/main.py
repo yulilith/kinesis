@@ -12,7 +12,7 @@ from tools import BodyTools
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mock", action="store_true", help="Use mock IMU stream instead of real ESP32")
-    parser.add_argument("--port", type=str, default="/dev/ttyUSB0", help="Serial port for ESP32")
+    parser.add_argument("--port", type=str, default="/dev/cu.usbserial-0001", help="Serial port for ESP32")
     parser.add_argument("--no-llm", action="store_true", help="Disable LLM reasoning layer")
     parser.add_argument("--model", type=str, default="gpt-5-mini", help="OpenAI model name")
     parser.add_argument("--log-dir", type=str, default="logs", help="Directory for JSONL logs")

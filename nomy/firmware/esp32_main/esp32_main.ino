@@ -5,7 +5,7 @@
 
 Adafruit_MPU6050 mpu;
 
-const int VIBRATION_PIN = 25;   // 修改成你的接线
+const int VIBRATION_PIN = 4;   // 修改成你的接线
 const int SAMPLE_INTERVAL_MS = 40;  // ~25Hz
 
 unsigned long lastSampleTime = 0;
