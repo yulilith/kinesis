@@ -143,14 +143,26 @@
 <div class="main-layout">
 <aside class="sidebar">
   <div class="sidebar-section toggle-section">
-    <h3>Data Source</h3>
+    <h3>Context Source</h3>
     <div class="toggle-row">
-      <span class="toggle-label">Mock <span class="mode-val" id="source-label">mock</span></span>
+      <span class="toggle-label">Mock</span>
       <label class="toggle-switch">
         <input type="checkbox" id="toggle-camera">
         <span class="toggle-track"></span>
       </label>
       <span class="toggle-label">Camera</span>
+    </div>
+  </div>
+
+  <div class="sidebar-section toggle-section">
+    <h3>Body Source</h3>
+    <div class="toggle-row">
+      <span class="toggle-label">Mock</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="toggle-esp32">
+        <span class="toggle-track"></span>
+      </label>
+      <span class="toggle-label">ESP32</span>
     </div>
   </div>
 
@@ -175,8 +187,15 @@
   </div>
 
   <div class="sidebar-section sensor-log-section">
-    <h3>Sensor Log</h3>
+    <h3>Camera Log</h3>
     <div class="sensor-log" id="sensor-log">
+      <div class="log-empty">No sensor data</div>
+    </div>
+  </div>
+
+  <div class="sidebar-section sensor-log-section">
+    <h3>Body Log</h3>
+    <div class="sensor-log" id="body-sensor-log">
       <div class="log-empty">No sensor data</div>
     </div>
   </div>
@@ -326,6 +345,13 @@ function handleState(entry) {
     }
     lastPosture = cls;
   }
+  else if (did === 'kinesess' && key === 'sensor_log') {
+    appendBodySensorLog(data);
+  }
+  else if (did === 'kinesess' && key === 'data_source') {
+    const mode = data.mode || 'mock';
+    toggleEsp32.checked = mode === 'esp32';
+  }
   else if (did === 'kinesess' && key === 'tension') {
     document.getElementById('ctx-tension').textContent = ((data.level||0)*100).toFixed(0) + '%';
   }
@@ -375,7 +401,6 @@ function handleState(entry) {
   else if (did === 'glasses' && key === 'data_source') {
     const mode = data.mode || 'mock';
     toggleCamera.checked = mode === 'camera';
-    sourceLabel.textContent = mode;
   }
   else if (did === 'glasses' && key === 'gaze') {
     // skip — too noisy
@@ -472,29 +497,62 @@ function appendSensorLog(data) {
 
 connectSSE();
 
-// --- Data source toggle ---
+// --- Data source toggles ---
 const toggleCamera = document.getElementById('toggle-camera');
-const sourceLabel = document.getElementById('source-label');
+const toggleEsp32 = document.getElementById('toggle-esp32');
 
 toggleCamera.addEventListener('change', () => {
   const mode = toggleCamera.checked ? 'camera' : 'mock';
-  sourceLabel.textContent = mode;
   fetch('/api/tool/update_state', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      device_id: 'glasses',
-      key: 'data_source',
-      data: { mode: mode },
-      confidence: 1.0,
-    }),
+    body: JSON.stringify({ device_id: 'glasses', key: 'data_source', data: { mode }, confidence: 1.0 }),
   }).then(() => {
-    addEvent({
-      agent: 'system', type: 'scene',
-      message: `Data source switched to <strong>${mode}</strong>`,
-    });
+    addEvent({ agent: 'system', type: 'scene', message: `Context source switched to <strong>${mode}</strong>` });
   });
 });
+
+toggleEsp32.addEventListener('change', () => {
+  const mode = toggleEsp32.checked ? 'esp32' : 'mock';
+  fetch('/api/tool/update_state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_id: 'kinesess', key: 'data_source', data: { mode }, confidence: 1.0 }),
+  }).then(() => {
+    addEvent({ agent: 'system', type: 'scene', message: `Body source switched to <strong>${mode}</strong>` });
+  });
+});
+
+// --- Body sensor log ---
+const bodySensorLog = document.getElementById('body-sensor-log');
+let bodyLogFirstEntry = true;
+
+function appendBodySensorLog(data) {
+  if (bodyLogFirstEntry) { bodySensorLog.innerHTML = ''; bodyLogFirstEntry = false; }
+
+  const line = document.createElement('div');
+  line.className = 'log-line';
+
+  const t = new Date().toLocaleTimeString();
+  const dev = (data.deviation_deg || 0).toFixed(1);
+  const tilt = (data.mean_tilt_deg || 0).toFixed(1);
+  const still = ((data.stillness_score || 0) * 100).toFixed(0);
+  const motion = (data.motion_level || 0).toFixed(3);
+  const frames = data.num_frames || 0;
+  const devAbs = Math.abs(data.deviation_deg || 0);
+  const devColor = devAbs < 8 ? '#98c379' : devAbs < 15 ? '#e5c07b' : '#e06c75';
+
+  line.innerHTML =
+    `<span class="log-time">${t}</span> ` +
+    `<span style="color:${devColor};font-weight:700">dev:${dev}\u00B0</span> ` +
+    `<span class="log-scores">tilt:${tilt}\u00B0</span> ` +
+    `<span class="log-scores">still:${still}%</span>` +
+    `<br><span class="log-scores">motion:${motion} frames:${frames}</span>`;
+
+  bodySensorLog.appendChild(line);
+  bodySensorLog.scrollTop = bodySensorLog.scrollHeight;
+  while (bodySensorLog.children.length > 50) bodySensorLog.removeChild(bodySensorLog.firstChild);
+}
 </script>
 </body>
 </html>

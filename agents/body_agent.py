@@ -1,13 +1,17 @@
 """Kinesess body sensor agent — interprets posture/tension and decides interventions.
 
-This is an LLM agent. It reads mock sensors on a fast loop (500ms), writes to
-the shared state blackboard, and invokes Claude when a threshold is crossed
+This is an LLM agent. It reads sensors on a fast loop (500ms), writes to the
+shared state blackboard, and invokes Claude when a threshold is crossed
 (bad posture > 30s, high tension). Before deciding, it reads the glasses agent's
 scene context and can ask the glasses agent questions via the discussion channel.
 
 Usage:
+    # Mock sensors (default)
     python agents/body_agent.py
-    python agents/body_agent.py --server http://localhost:9000/mcp
+    python agents/body_agent.py --demo
+
+    # Real ESP32 IMU sensor
+    python agents/body_agent.py --esp32 --serial-port /dev/cu.usbserial-0001
 """
 
 from __future__ import annotations
@@ -32,6 +36,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from schemas import PostureClass, PostureReading, TensionReading
 from ble.mock_sensors import MockPostureSensor, MockTensionSensor
+
+# Teammate's ESP32 bridge + feature extraction (body-agent/python/)
+BODY_AGENT_DIR = str(Path(__file__).resolve().parent.parent / "body-agent" / "python")
+sys.path.insert(0, BODY_AGENT_DIR)
+
+# Deviation → PostureClass mapping
+def _deviation_to_posture(dev_deg: float) -> PostureClass:
+    abs_dev = abs(dev_deg)
+    if abs_dev < 8:
+        return PostureClass.GOOD
+    elif abs_dev < 15:
+        return PostureClass.SLOUCHING
+    elif dev_deg > 0:
+        return PostureClass.HUNCHED
+    else:
+        return PostureClass.LEANING_LEFT if abs_dev < 20 else PostureClass.LEANING_RIGHT
 
 # Scripted demo: good(20s) → slouching(40s) → good(15s) → hunched(35s) → repeat
 DEMO_POSTURE_TIMELINE = [
@@ -144,10 +164,16 @@ async def _execute_tool_call(session: ClientSession, name: str, arguments: dict)
 # ---------------------------------------------------------------------------
 
 class BodyAgent:
-    def __init__(self, server_url: str = DEFAULT_SERVER_URL, demo: bool = False) -> None:
+    def __init__(self, server_url: str = DEFAULT_SERVER_URL, demo: bool = False,
+                 use_esp32: bool = False, serial_port: str = "/dev/cu.usbserial-0001") -> None:
         self._server_url = server_url
         self._local = _LocalState()
         self._demo = demo
+        self._use_esp32 = use_esp32
+        self._serial_port = serial_port
+        self._esp32 = None
+        self._baseline_tilt: float = 0.0
+        self._baseline_calibrated: bool = False
 
     async def run(self) -> None:
         while True:
@@ -171,21 +197,105 @@ class BodyAgent:
             sensor_task.cancel()
             llm_task.cancel()
 
+    # -- ESP32 bridge --
+
+    def pre_init_esp32(self) -> None:
+        """Init ESP32 bridge on main thread. Falls back gracefully."""
+        if self._esp32 is not None:
+            return
+        try:
+            from bridge import ESP32Bridge
+            logger.info("Initializing ESP32 on %s", self._serial_port)
+            self._esp32 = ESP32Bridge(port=self._serial_port)
+            self._esp32.start_streaming()
+            logger.info("ESP32 bridge ready")
+        except Exception as e:
+            logger.warning("ESP32 init failed: %s — ESP32 mode unavailable", e)
+            self._esp32 = None
+
+    def _esp32_to_readings(self) -> tuple[PostureReading, TensionReading, dict]:
+        """Read IMU frames from ESP32, compute features, return (posture, tension, raw)."""
+        from features import compute_features
+
+        frames = self._esp32.get_recent_frames(window_ms=1000)
+        feats = compute_features(frames, baseline_tilt_deg=self._baseline_tilt)
+
+        if not feats["ok"]:
+            return (
+                PostureReading(PostureClass.UNKNOWN, 0.0, 0.0, 0.0),
+                TensionReading(level=0.0, zone="unknown"),
+                feats,
+            )
+
+        # Calibrate baseline from first good window
+        if not self._baseline_calibrated and feats["num_frames"] > 5:
+            self._baseline_tilt = feats["mean_tilt_deg"]
+            self._baseline_calibrated = True
+            feats["deviation_deg"] = 0.0
+            logger.info("Baseline calibrated: %.1f°", self._baseline_tilt)
+
+        dev = feats["deviation_deg"]
+        posture_cls = _deviation_to_posture(dev)
+        confidence = min(1.0, feats["num_frames"] / 20.0)
+
+        posture = PostureReading(
+            classification=posture_cls,
+            confidence=confidence,
+            duration_s=0.0,  # tracked by the sensor loop
+            deviation_degrees=abs(dev),
+        )
+
+        # Stillness inversely maps to tension (moving = less tense)
+        tension_level = max(0.0, 1.0 - feats["stillness_score"])
+        tension = TensionReading(level=tension_level, zone="upper_back")
+
+        return posture, tension, feats
+
+    async def _check_data_source(self, session: ClientSession) -> str:
+        """Read the data_source toggle from the blackboard (set by dashboard)."""
+        try:
+            result = await session.read_resource("state://kinesess/data_source")
+            content = result.contents[0]
+            data = json.loads(content.text if hasattr(content, "text") else str(content))
+            return data.get("data", {}).get("mode", "mock")
+        except Exception:
+            return "esp32" if self._use_esp32 else "mock"
+
     # -- fast path: sensor loop --
 
     async def _sensor_loop(self, session: ClientSession) -> None:
-        posture_sensor = MockPostureSensor(scripted=DEMO_POSTURE_TIMELINE if self._demo else None)
-        tension_sensor = MockTensionSensor()
+        # Mock sensors always available as fallback
+        mock_posture = MockPostureSensor(scripted=DEMO_POSTURE_TIMELINE if self._demo else None)
+        mock_tension = MockTensionSensor()
+
+        active_mode = "esp32" if self._esp32 is not None else "mock"
 
         while True:
-            posture = await posture_sensor.read()
-            tension = await tension_sensor.read()
+            # Check dashboard toggle
+            requested_mode = await self._check_data_source(session)
+            if requested_mode != active_mode:
+                if requested_mode == "esp32" and self._esp32 is None:
+                    logger.warning("ESP32 not available — staying on mock")
+                    requested_mode = "mock"
+                else:
+                    logger.info("Switching body data source: %s → %s", active_mode, requested_mode)
+                active_mode = requested_mode
+
+            # Read from active source
+            imu_feats = None
+            if active_mode == "esp32" and self._esp32 is not None:
+                posture, tension, imu_feats = await asyncio.to_thread(self._esp32_to_readings)
+            else:
+                posture = await mock_posture.read()
+                tension = await mock_tension.read()
 
             self._local.last_posture = posture
             self._local.last_tension = tension
 
             await self._safe_update(session, "posture", posture.to_dict(), posture.confidence)
             await self._safe_update(session, "tension", tension.to_dict(), 0.9)
+            if imu_feats is not None:
+                await self._safe_update(session, "sensor_log", imu_feats, posture.confidence)
 
             # Track bad posture duration
             is_bad = posture.classification not in (PostureClass.GOOD, PostureClass.UNKNOWN)
@@ -393,6 +503,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Kinesess body sensor agent")
     parser.add_argument("--server", default=DEFAULT_SERVER_URL)
     parser.add_argument("--demo", action="store_true", help="Use scripted posture timeline for demos")
+    parser.add_argument("--esp32", action="store_true", help="Use real ESP32 IMU sensor")
+    parser.add_argument("--serial-port", default="/dev/cu.usbserial-0001", help="ESP32 serial port")
     args = parser.parse_args()
 
-    asyncio.run(BodyAgent(server_url=args.server, demo=args.demo).run())
+    agent = BodyAgent(
+        server_url=args.server,
+        demo=args.demo,
+        use_esp32=args.esp32,
+        serial_port=args.serial_port,
+    )
+
+    # Always try to init ESP32 on main thread so dashboard toggle works
+    agent.pre_init_esp32()
+
+    asyncio.run(agent.run())
