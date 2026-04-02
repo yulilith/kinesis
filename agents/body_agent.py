@@ -130,6 +130,7 @@ class _LocalState:
     bad_posture_since: float | None = None
     high_tension_since: float | None = None
     last_haptic_time: float = 0.0
+    last_llm_time: float = 0.0
     trigger_reason: str = ""
     llm_trigger: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -312,8 +313,9 @@ class BodyAgent:
             elif tension.level <= HIGH_TENSION_THRESHOLD:
                 self._local.high_tension_since = None
 
-            # Check if we should wake the LLM
-            cooldown_ok = (now - self._local.last_haptic_time) > LLM_COOLDOWN_S
+            # Check if we should wake the LLM (cooldown from last LLM call OR last haptic)
+            last_action = max(self._local.last_haptic_time, self._local.last_llm_time)
+            cooldown_ok = (now - last_action) > LLM_COOLDOWN_S
 
             if cooldown_ok and not self._local.llm_trigger.is_set():
                 bad_dur = (now - self._local.bad_posture_since) if self._local.bad_posture_since else 0
@@ -352,6 +354,8 @@ class BodyAgent:
             self._local.llm_trigger.clear()
 
             try:
+                self._local.last_llm_time = time.time()
+
                 system_prompt = await self._load_system_prompt(session)
                 glasses_ctx = await self._read_glasses_context(session)
                 planner_ctx = await self._read_planner_context(session)
