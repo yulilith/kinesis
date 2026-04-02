@@ -212,28 +212,58 @@ class ContextAgent:
             timestamp=ts or time.time(),
         )
 
+    async def _check_data_source(self, session: ClientSession) -> str:
+        """Read the data_source toggle from the blackboard (set by dashboard)."""
+        try:
+            result = await session.read_resource("state://glasses/data_source")
+            content = result.contents[0]
+            data = json.loads(content.text if hasattr(content, "text") else str(content))
+            return data.get("data", {}).get("mode", "mock")
+        except Exception:
+            return "camera" if self._use_camera else "mock"
+
+    def _stop_camera(self) -> None:
+        if self._camera:
+            self._camera.stop()
+            self._camera = None
+            self._inferencer = None
+            logger.info("Camera stopped")
+
     async def _sensor_loop(self, session: ClientSession) -> None:
+        # Init mock sensors (always available as fallback)
+        mock_scene = MockSceneSensor(scripted=DEMO_TIMELINE if self._demo else None)
+        mock_gaze = MockGazeSensor(scene_sensor=mock_scene)
+
+        # Init camera if starting in camera mode
         if self._use_camera:
-            # Real camera + CLIP inference
             await asyncio.to_thread(self._init_camera)
-            gaze_sensor = None
-        else:
-            # Mock sensors
-            scene_sensor = MockSceneSensor(scripted=DEMO_TIMELINE if self._demo else None)
-            gaze_sensor = MockGazeSensor(scene_sensor=scene_sensor)
+
+        active_mode = "camera" if self._use_camera else "mock"
 
         while True:
-            if self._use_camera:
+            # Check dashboard toggle
+            requested_mode = await self._check_data_source(session)
+
+            if requested_mode != active_mode:
+                logger.info("Switching data source: %s → %s", active_mode, requested_mode)
+                if requested_mode == "camera" and self._camera is None:
+                    await asyncio.to_thread(self._init_camera)
+                elif requested_mode == "mock" and self._camera is not None:
+                    await asyncio.to_thread(self._stop_camera)
+                active_mode = requested_mode
+
+            # Read from active source
+            if active_mode == "camera" and self._camera is not None:
                 scene_ctx = await asyncio.to_thread(self._camera_to_scene_context)
                 gaze = None
             else:
-                scene_ctx = await scene_sensor.read()
-                gaze = await gaze_sensor.read()
+                scene_ctx = await mock_scene.read()
+                gaze = await mock_gaze.read()
 
             self._local.last_scene_context = scene_ctx
             self._local.last_gaze = gaze
 
-            # Write to blackboard (serialized to avoid session contention)
+            # Write to blackboard
             await self._safe_update(session, "context", scene_ctx.to_dict(), scene_ctx.confidence)
             if gaze is not None:
                 await self._safe_update(session, "gaze", gaze.to_dict(), gaze.confidence)
@@ -249,7 +279,7 @@ class ContextAgent:
                         self._local.trigger_reason = f"scene_change_{old_scene.value}_to_{scene_ctx.scene.value}"
                         self._local.llm_trigger.set()
 
-            # Check for pending discussion questions (serialized with sensor writes)
+            # Check for pending discussion questions
             await self._check_pending_discussion(session)
 
             await asyncio.sleep(SENSOR_INTERVAL_S)

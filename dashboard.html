@@ -46,6 +46,18 @@
   .filter-item[data-agent="brain"] input:checked { border-color: #c678dd; background: #c678dd; }
   .filter-item[data-agent="system"] input:checked { border-color: #5c6370; background: #5c6370; }
 
+  /* Toggle switch */
+  .toggle-section { margin-bottom: 24px; }
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; }
+  .toggle-label { font-size: 0.8em; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }
+  .toggle-label .mode-val { color: #56b6c2; font-weight: 700; }
+  .toggle-switch { position: relative; width: 36px; height: 18px; cursor: pointer; flex-shrink: 0; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-track { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #333; transition: background 0.2s; }
+  .toggle-track::after { content: ''; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; background: #888; transition: transform 0.2s, background 0.2s; }
+  .toggle-switch input:checked + .toggle-track { background: #1a3a2a; }
+  .toggle-switch input:checked + .toggle-track::after { transform: translateX(18px); background: #98c379; }
+
   /* Main feed */
   .feed { flex: 1; overflow-y: auto; padding: 16px 24px; }
   .feed::-webkit-scrollbar { width: 4px; }
@@ -116,6 +128,18 @@
 
 <div class="main-layout">
 <aside class="sidebar">
+  <div class="sidebar-section toggle-section">
+    <h3>Data Source</h3>
+    <div class="toggle-row">
+      <span class="toggle-label">Mock <span class="mode-val" id="source-label">mock</span></span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="toggle-camera">
+        <span class="toggle-track"></span>
+      </label>
+      <span class="toggle-label">Camera</span>
+    </div>
+  </div>
+
   <div class="sidebar-section">
     <h3>Show Agents</h3>
     <div class="filter-item" data-agent="kinesess">
@@ -324,6 +348,11 @@ function handleState(entry) {
       detail: `trigger: ${data.trigger || '?'}`,
     });
   }
+  else if (did === 'glasses' && key === 'data_source') {
+    const mode = data.mode || 'mock';
+    toggleCamera.checked = mode === 'camera';
+    sourceLabel.textContent = mode;
+  }
   else if (did === 'glasses' && key === 'gaze') {
     // skip — too noisy
   }
@@ -376,6 +405,30 @@ function updateChips() {
 setInterval(updateChips, 2000);
 
 connectSSE();
+
+// --- Data source toggle ---
+const toggleCamera = document.getElementById('toggle-camera');
+const sourceLabel = document.getElementById('source-label');
+
+toggleCamera.addEventListener('change', () => {
+  const mode = toggleCamera.checked ? 'camera' : 'mock';
+  sourceLabel.textContent = mode;
+  fetch('/api/tool/update_state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      device_id: 'glasses',
+      key: 'data_source',
+      data: { mode: mode },
+      confidence: 1.0,
+    }),
+  }).then(() => {
+    addEvent({
+      agent: 'system', type: 'scene',
+      message: `Data source switched to <strong>${mode}</strong>`,
+    });
+  });
+});
 </script>
 </body>
 </html>
