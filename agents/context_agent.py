@@ -21,10 +21,16 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# macOS AVFoundation requires camera auth from the main thread.
+# Setting this env var skips the in-library auth request so the terminal's
+# existing camera permission is used instead.
+os.environ.setdefault("OPENCV_AVFOUNDATION_SKIP_AUTH", "1")
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
@@ -185,7 +191,15 @@ class ContextAgent:
     # -- fast path: sensor loop --
 
     def _init_camera(self) -> None:
-        """Lazy-init real camera + CLIP inferencer."""
+        """Init real camera + CLIP inferencer.
+
+        Camera capture must be opened on the main thread on macOS
+        (AVFoundation requirement). Call this before the async loop or
+        from the main thread — never from asyncio.to_thread.
+        """
+        if self._camera is not None:
+            return  # already initialized
+
         from camera_bridge import CameraBridge
         from scene_features import CLIPContextInferencer
 
@@ -229,16 +243,17 @@ class ContextAgent:
             self._inferencer = None
             logger.info("Camera stopped")
 
+    def pre_init_camera(self) -> None:
+        """Call from the main thread BEFORE asyncio.run() to satisfy macOS
+        AVFoundation's requirement that VideoCapture is opened on the main thread."""
+        self._init_camera()
+
     async def _sensor_loop(self, session: ClientSession) -> None:
         # Init mock sensors (always available as fallback)
         mock_scene = MockSceneSensor(scripted=DEMO_TIMELINE if self._demo else None)
         mock_gaze = MockGazeSensor(scene_sensor=mock_scene)
 
-        # Init camera if starting in camera mode
-        if self._use_camera:
-            await asyncio.to_thread(self._init_camera)
-
-        active_mode = "camera" if self._use_camera else "mock"
+        active_mode = "camera" if self._camera is not None else "mock"
 
         while True:
             # Check dashboard toggle
@@ -246,8 +261,13 @@ class ContextAgent:
 
             if requested_mode != active_mode:
                 logger.info("Switching data source: %s → %s", active_mode, requested_mode)
-                if requested_mode == "camera" and self._camera is None:
-                    await asyncio.to_thread(self._init_camera)
+                if requested_mode == "camera":
+                    # Camera init must happen on the main thread (macOS).
+                    # If not already initialized, run it via the default executor
+                    # which on macOS with OPENCV_AVFOUNDATION_SKIP_AUTH=1 is OK.
+                    if self._camera is None:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(None, self._init_camera)
                 elif requested_mode == "mock" and self._camera is not None:
                     await asyncio.to_thread(self._stop_camera)
                 active_mode = requested_mode
@@ -430,10 +450,17 @@ if __name__ == "__main__":
     parser.add_argument("--clip-model", default="openai/clip-vit-base-patch32", help="HuggingFace CLIP model name")
     args = parser.parse_args()
 
-    asyncio.run(ContextAgent(
+    agent = ContextAgent(
         server_url=args.server,
         demo=args.demo,
         use_camera=args.camera,
         camera_index=args.camera_index,
         clip_model=args.clip_model,
-    ).run())
+    )
+
+    # Camera must be opened on the main thread (macOS AVFoundation).
+    # Do it here before asyncio.run() takes over.
+    if args.camera:
+        agent.pre_init_camera()
+
+    asyncio.run(agent.run())
