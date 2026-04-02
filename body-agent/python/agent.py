@@ -1,11 +1,11 @@
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 from state import AgentConfig, AgentMemory
 
 
 class PostureAgent:
-    def __init__(self, tools, config: AgentConfig | None = None, llm_reasoner=None, logger=None):
+    def __init__(self, tools, config: Optional[AgentConfig] = None, llm_reasoner=None, logger=None):
         self.tools = tools
         self.config = config or AgentConfig()
         self.memory = AgentMemory()

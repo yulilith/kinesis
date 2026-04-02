@@ -1,11 +1,11 @@
 import json
 import os
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 class JsonlLogger:
-    def __init__(self, log_dir: str = "logs", run_name: str | None = None):
+    def __init__(self, log_dir: str = "logs", run_name: Optional[str] = None):
         os.makedirs(log_dir, exist_ok=True)
 
         if run_name is None:
@@ -20,7 +20,7 @@ class JsonlLogger:
         interpretation: Dict[str, Any],
         memory: Dict[str, Any],
         action_taken: str,
-        reasoning: Dict[str, Any] | None = None,
+        reasoning: Optional[Dict[str, Any]] = None,
     ) -> None:
         record = {
             "ts": time.time(),
