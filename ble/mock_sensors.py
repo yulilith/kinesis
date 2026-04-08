@@ -21,15 +21,20 @@ from typing import Protocol, runtime_checkable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from schemas import (
+    EMSChannel,
+    EMSCommand,
     GazeReading,
     GazeTarget,
     HapticCommand,
     HapticPattern,
+    IMULocation,
+    IMUReading,
     PostureClass,
     PostureReading,
     SceneContext,
     SceneType,
     TensionReading,
+    VibrationZone,
 )
 
 
@@ -58,8 +63,19 @@ class GazeSensor(Protocol):
 
 
 @runtime_checkable
+class IMUSensor(Protocol):
+    async def read(self) -> IMUReading: ...
+
+
+@runtime_checkable
 class HapticActuator(Protocol):
-    async def fire(self, pattern: HapticPattern, intensity: float) -> None: ...
+    async def fire(self, pattern: HapticPattern, intensity: float,
+                   zone: VibrationZone | None = None) -> None: ...
+
+
+@runtime_checkable
+class EMSActuator(Protocol):
+    async def fire(self, cmd: EMSCommand) -> bool: ...
 
 
 # ---------------------------------------------------------------------------
@@ -88,14 +104,58 @@ class _ScriptedTimeline[T]:
 # Mock implementations
 # ---------------------------------------------------------------------------
 
+class MockIMUSensor:
+    """Single IMU at a fixed body location. Produces pitch/roll/yaw readings.
+
+    Good posture:  small angles (pitch ≈ 0–5°, roll ≈ 0–3°)
+    Bad posture:   larger pitch (forward lean) or roll (lateral lean)
+    """
+
+    # Typical angle ranges per posture state (pitch_mean, pitch_std, roll_std)
+    _GOOD_ANGLES = (3.0, 2.0, 2.0)
+    _BAD_ANGLES  = (22.0, 6.0, 5.0)
+
+    def __init__(self, location: IMULocation) -> None:
+        self._location = location
+        self._is_bad = False
+        self._switch_timer = time.time()
+
+    async def read(self) -> IMUReading:
+        # Randomly toggle good/bad state every ~30s
+        if time.time() - self._switch_timer > random.uniform(20.0, 40.0):
+            self._is_bad = not self._is_bad
+            self._switch_timer = time.time()
+
+        pitch_mean, pitch_std, roll_std = (
+            self._BAD_ANGLES if self._is_bad else self._GOOD_ANGLES
+        )
+        # Lower back IMU shows slightly less pitch than upper back when hunching
+        if self._location == IMULocation.LOWER_BACK:
+            pitch_mean *= 0.6
+
+        return IMUReading(
+            location=self._location,
+            pitch_deg=max(0.0, random.gauss(pitch_mean, pitch_std)),
+            roll_deg=random.gauss(0.0, roll_std),
+            yaw_deg=random.gauss(0.0, 1.5),
+            confidence=random.uniform(0.75, 1.0),
+        )
+
+
 class MockPostureSensor:
-    """Produces posture readings in random or scripted mode."""
+    """Fuses readings from two MockIMUSensors into a PostureReading.
+
+    Scripted mode: uses a pre-defined timeline of (duration_s, PostureReading).
+    Random mode:   drives both IMUs independently and derives classification.
+    """
 
     def __init__(
         self,
         scripted: list[tuple[float, PostureReading]] | None = None,
     ) -> None:
         self._scripted = _ScriptedTimeline(scripted) if scripted else None
+        self._upper = MockIMUSensor(IMULocation.UPPER_BACK)
+        self._lower = MockIMUSensor(IMULocation.LOWER_BACK)
         self._posture_start = time.time()
         self._current_class = PostureClass.GOOD
 
@@ -103,22 +163,44 @@ class MockPostureSensor:
         if self._scripted:
             return self._scripted.current()
 
-        # Random mode: occasionally switch postures
-        if random.random() < 0.02:  # ~2% chance per read to switch
-            self._current_class = random.choice(list(PostureClass))
+        upper = await self._upper.read()
+        lower = await self._lower.read()
+
+        # Derived spinal metrics
+        flexion_deg           = upper.pitch_deg - lower.pitch_deg
+        lateral_asymmetry_deg = abs(upper.roll_deg - lower.roll_deg)
+        deviation_degrees     = upper.pitch_deg  # overall deviation = upper pitch
+
+        # Classify from IMU angles
+        new_class = self._classify(upper, flexion_deg, lateral_asymmetry_deg)
+        if new_class != self._current_class:
+            self._current_class = new_class
             self._posture_start = time.time()
 
-        duration = time.time() - self._posture_start
-        deviation = (
-            random.gauss(3.0, 2.0) if self._current_class == PostureClass.GOOD
-            else random.gauss(20.0, 5.0)
-        )
         return PostureReading(
             classification=self._current_class,
-            confidence=random.uniform(0.7, 1.0),
-            duration_s=duration,
-            deviation_degrees=max(0.0, deviation),
+            confidence=min(upper.confidence, lower.confidence),
+            duration_s=time.time() - self._posture_start,
+            deviation_degrees=round(deviation_degrees, 1),
+            imu_upper=upper,
+            imu_lower=lower,
+            lateral_asymmetry_deg=round(lateral_asymmetry_deg, 1),
+            flexion_deg=round(flexion_deg, 1),
         )
+
+    @staticmethod
+    def _classify(upper: IMUReading, flexion_deg: float,
+                  lateral_asymmetry_deg: float) -> PostureClass:
+        if upper.pitch_deg > 30 and flexion_deg > 10:
+            return PostureClass.HUNCHED
+        if upper.pitch_deg > 15:
+            return PostureClass.SLOUCHING
+        if lateral_asymmetry_deg > 8:
+            return (PostureClass.LEANING_LEFT if upper.roll_deg < 0
+                    else PostureClass.LEANING_RIGHT)
+        if upper.pitch_deg < 8:
+            return PostureClass.GOOD
+        return PostureClass.UNKNOWN
 
 
 class MockTensionSensor:
@@ -225,14 +307,53 @@ class MockHapticActuator:
     def __init__(self) -> None:
         self.history: list[HapticCommand] = []
 
-    async def fire(self, pattern: HapticPattern, intensity: float) -> None:
-        cmd = HapticCommand(
-            pattern=pattern,
-            reason="mock",
-            intensity=intensity,
-        )
+    async def fire(self, pattern: HapticPattern, intensity: float,
+                   zone: VibrationZone | None = None) -> None:
+        cmd = HapticCommand(pattern=pattern, reason="mock",
+                            intensity=intensity, zone=zone)
         self.history.append(cmd)
+        zone_str = zone.value if zone else "all"
         print(
             f"[HAPTIC] {time.strftime('%H:%M:%S')} "
-            f"pattern={pattern.value} intensity={intensity:.1f}"
+            f"pattern={pattern.value} zone={zone_str} intensity={intensity:.1f}"
         )
+
+
+class MockEMSActuator:
+    """Logs EMS commands to console. Enforces per-channel cooldown and intensity cap."""
+
+    MAX_INTENSITY_MA = 15.0
+    COOLDOWN_S       = 120.0
+
+    def __init__(self) -> None:
+        self.history: list[EMSCommand] = []
+        self._last_fire: dict[EMSChannel, float] = {}
+
+    async def fire(self, cmd: EMSCommand) -> bool:
+        """Returns True if fired, False if blocked by cooldown or safety cap."""
+        now = time.time()
+        last = self._last_fire.get(cmd.channel, 0.0)
+        if now - last < self.COOLDOWN_S:
+            wait = self.COOLDOWN_S - (now - last)
+            print(f"[EMS] {time.strftime('%H:%M:%S')} "
+                  f"channel={cmd.channel.value} BLOCKED cooldown {wait:.0f}s remaining")
+            return False
+
+        safe_cmd = EMSCommand(
+            channel=cmd.channel,
+            intensity_ma=min(cmd.intensity_ma, self.MAX_INTENSITY_MA),
+            duration_ms=min(cmd.duration_ms, 3000),
+            frequency_hz=max(20.0, min(cmd.frequency_hz, 80.0)),
+            reason=cmd.reason,
+        )
+        self._last_fire[cmd.channel] = now
+        self.history.append(safe_cmd)
+        print(
+            f"[EMS]   {time.strftime('%H:%M:%S')} "
+            f"channel={safe_cmd.channel.value} "
+            f"{safe_cmd.intensity_ma:.1f}mA "
+            f"{safe_cmd.duration_ms}ms "
+            f"{safe_cmd.frequency_hz:.0f}Hz "
+            f"reason={safe_cmd.reason}"
+        )
+        return True

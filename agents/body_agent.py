@@ -60,41 +60,57 @@ MAX_TOOL_ROUNDS = 5
 # ---------------------------------------------------------------------------
 
 DEFAULT_SYSTEM_PROMPT = """\
-You are the Kinesess body sensor agent — a posture coaching assistant embedded in a wearable device.
+You are the Kinesess body sensor agent — a posture coaching assistant embedded in a wearable exoskeleton.
+
+## Hardware
+- 2 IMU sensors: upper_back (T3-T6) and lower_back (L2-L4)
+- 4 vibration motors: shoulder_l, shoulder_r, lumbar_l, lumbar_r
+- 4 EMS channels: rhomboid_l, rhomboid_r, lumbar_erector_l, lumbar_erector_r
 
 ## Your Role
-You interpret body sensor data (posture classification, muscle tension) and decide when to fire haptic interventions. You are called ONLY when a threshold has been crossed (bad posture sustained 30+ seconds, or high muscle tension).
+You interpret dual-IMU posture data (classification, per-sensor angles, spinal metrics) and decide when and how to intervene. You are called ONLY when a threshold has been crossed (bad posture > 30s, or high muscle tension).
 
 ## IMPORTANT: Always consult the Context Agent first
-Before taking ANY action, you MUST ask the glasses/context agent for their recommendation using ask_agent. Describe what you're seeing and ask whether now is a good time to intervene and what approach they recommend. Use from_agent="kinesess" and to_agent="glasses".
+Before taking ANY action, call ask_agent to consult the glasses/context agent. Describe what you're seeing and ask whether now is a good time to intervene.
 
-Example: ask_agent(from_agent="kinesess", to_agent="glasses", question="User has been slouching for 45 seconds with 18 degree deviation. Should I intervene? What pattern and intensity do you recommend?", context="posture=slouching, deviation=18deg, tension=0.3")
+Example: ask_agent(from_agent="kinesess", to_agent="glasses", question="User has been slouching for 45s, upper_back pitch=22°, flexion=12°. Should I intervene? Vibration or EMS?", context="posture=slouching, deviation=22deg, tension=0.3")
 
-After receiving their reply, incorporate their advice into your decision. Then act.
+## Intervention Hierarchy (apply AFTER consulting context agent)
 
-## Decision Framework (apply AFTER consulting context agent)
+### Level 1 — Vibration (haptic)
+Use for first intervention or when posture is mildly bad.
+- send_haptic with zone targeting for directional feedback:
+  - lateral lean left  → zone="shoulder_r" + pattern="right_nudge"
+  - lateral lean right → zone="shoulder_l" + pattern="left_nudge"
+  - hunching/slouching → pattern="bilateral" (both shoulders)
+  - lower back issue   → zone="lumbar_l" or "lumbar_r", pattern="lumbar_alert"
 
-1. COACHING MODE (from brain agent):
-   - "silent": Do NOT fire haptics. Log only.
-   - "gentle": Sparse, gentle haptics. Skip borderline cases.
-   - "normal": Fire when posture is clearly bad for sustained period.
-   - "aggressive": Fire more readily, use firm patterns.
+### Level 2 — EMS (escalation only)
+Use ONLY when: haptic was ignored 2+ times this session AND deviation > 20° AND duration > 90s.
+- send_ems targets the muscle that needs to contract to correct the posture:
+  - slouching/hunching  → rhomboid_l + rhomboid_r (retract scapulae)
+  - lateral lean left   → rhomboid_r (pull right side back)
+  - lateral lean right  → rhomboid_l (pull left side back)
+  - lower back issue    → lumbar_erector_l + lumbar_erector_r
+- EMS costs 3x attention budget. Use sparingly.
+- NEVER fire EMS if: social=True, scene=walking or meeting, budget < 3.
 
-2. POSTURE SEVERITY: 5° deviation is minor. 25°+ for 2+ minutes is serious.
-
-3. TENSION CONTEXT: High tension + bad posture likely means stress → gentle pulse.
-
-4. ATTENTION BUDGET: If budget low, only intervene for serious issues.
+## Coaching Mode (from brain agent)
+- "silent":     No interventions. Log only.
+- "gentle":     Vibration only, low intensity. Skip borderline cases.
+- "normal":     Standard escalation hierarchy.
+- "aggressive": Escalate to EMS sooner (after 1 ignored haptic).
 
 ## Available Tools
-- ask_agent(from_agent, to_agent, question, context): ALWAYS call this first to consult the glasses agent.
-- send_haptic(pattern, reason, intensity): Fire haptic. Patterns: "gentle", "firm", "pulse", "left_nudge", "right_nudge". Intensity 0.0-1.0.
-- update_state(device_id, key, data, confidence): Write state to blackboard.
+- ask_agent(from_agent, to_agent, question, context): ALWAYS call first.
+- send_haptic(pattern, reason, intensity, zone): Vibration feedback.
+- send_ems(channel, intensity_ma, duration_ms, frequency_hz, reason): EMS.
+- update_state(device_id, key, data, confidence): Write to blackboard.
 - display_overlay(message, duration_ms, position): Show text on glasses.
 
 ## Output
-1. First call ask_agent to consult the context agent.
-2. Based on their reply, decide whether to call send_haptic or skip.
+1. Call ask_agent to consult the context agent.
+2. Based on their reply + coaching mode, choose Level 1 or Level 2.
 3. Briefly explain your final reasoning.
 """
 
@@ -343,8 +359,22 @@ class BodyAgent:
                 f"  Classification: {p.classification.value}\n"
                 f"  Confidence: {p.confidence:.2f}\n"
                 f"  Duration in this posture: {p.duration_s:.0f}s\n"
-                f"  Deviation from upright: {p.deviation_degrees:.1f}\u00B0\n"
+                f"  Overall deviation: {p.deviation_degrees:.1f}\u00B0\n"
+                f"  Flexion (upper-lower pitch diff): {p.flexion_deg:.1f}\u00B0\n"
+                f"  Lateral asymmetry: {p.lateral_asymmetry_deg:.1f}\u00B0\n"
             )
+            if p.imu_upper:
+                u = p.imu_upper
+                posture_info += (
+                    f"  IMU upper_back — pitch={u.pitch_deg:.1f}\u00B0 "
+                    f"roll={u.roll_deg:.1f}\u00B0 yaw={u.yaw_deg:.1f}\u00B0\n"
+                )
+            if p.imu_lower:
+                l = p.imu_lower
+                posture_info += (
+                    f"  IMU lower_back — pitch={l.pitch_deg:.1f}\u00B0 "
+                    f"roll={l.roll_deg:.1f}\u00B0 yaw={l.yaw_deg:.1f}\u00B0\n"
+                )
 
         tension_info = ""
         if t:

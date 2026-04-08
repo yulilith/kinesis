@@ -43,15 +43,36 @@ class GazeTarget(Enum):
     UNKNOWN = "unknown"
 
 
-class HapticPattern(Enum):
-    GENTLE = "gentle"
-    FIRM = "firm"
-    PULSE = "pulse"
-    LEFT_NUDGE = "left_nudge"
-    RIGHT_NUDGE = "right_nudge"
+class IMULocation(str, Enum):
+    UPPER_BACK = "upper_back"   # T3-T6, between shoulder blades
+    LOWER_BACK = "lower_back"   # L2-L4, lumbar region
 
 
-class InterventionMode(Enum):
+class VibrationZone(str, Enum):
+    SHOULDER_L = "shoulder_l"   # left scapular region
+    SHOULDER_R = "shoulder_r"   # right scapular region
+    LUMBAR_L   = "lumbar_l"     # lower back left
+    LUMBAR_R   = "lumbar_r"     # lower back right
+
+
+class EMSChannel(str, Enum):
+    RHOMBOID_L       = "rhomboid_l"        # left rhomboid → retract left scapula
+    RHOMBOID_R       = "rhomboid_r"        # right rhomboid → retract right scapula
+    LUMBAR_ERECTOR_L = "lumbar_erector_l"  # left lumbar erector → extend lumbar
+    LUMBAR_ERECTOR_R = "lumbar_erector_r"  # right lumbar erector → extend lumbar
+
+
+class HapticPattern(str, Enum):
+    GENTLE       = "gentle"
+    FIRM         = "firm"
+    PULSE        = "pulse"
+    LEFT_NUDGE   = "left_nudge"
+    RIGHT_NUDGE  = "right_nudge"
+    LUMBAR_ALERT = "lumbar_alert"   # lower back vibration only
+    BILATERAL    = "bilateral"      # both shoulders simultaneously
+
+
+class InterventionMode(str, Enum):
     SILENT = "silent"
     GENTLE = "gentle"
     NORMAL = "normal"
@@ -71,11 +92,53 @@ class EscalationType(Enum):
 # ---------------------------------------------------------------------------
 
 @dataclass
+class IMUReading:
+    """Raw reading from a single IMU sensor at a fixed body location."""
+    location: IMULocation
+    pitch_deg: float        # forward/backward tilt (positive = forward lean)
+    roll_deg: float         # left/right lean (positive = right lean)
+    yaw_deg: float          # axial rotation
+    confidence: float       # 0.0 - 1.0
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "location": self.location.value,
+            "pitch_deg": self.pitch_deg,
+            "roll_deg": self.roll_deg,
+            "yaw_deg": self.yaw_deg,
+            "confidence": self.confidence,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> IMUReading:
+        return cls(
+            location=IMULocation(d["location"]),
+            pitch_deg=d["pitch_deg"],
+            roll_deg=d["roll_deg"],
+            yaw_deg=d["yaw_deg"],
+            confidence=d["confidence"],
+            timestamp=d.get("timestamp", time.time()),
+        )
+
+
+@dataclass
 class PostureReading:
+    # High-level classification derived from both IMUs
     classification: PostureClass
-    confidence: float  # 0.0 - 1.0
-    duration_s: float  # seconds in this posture
-    deviation_degrees: float  # deviation from calibrated upright
+    confidence: float       # 0.0 - 1.0
+    duration_s: float       # seconds in this posture
+    deviation_degrees: float  # overall deviation scalar from upright
+
+    # Per-IMU raw data
+    imu_upper: Optional[IMUReading] = None  # upper_back IMU
+    imu_lower: Optional[IMUReading] = None  # lower_back IMU
+
+    # Derived spinal metrics
+    lateral_asymmetry_deg: float = 0.0  # |upper.roll - lower.roll|, detects lateral lean
+    flexion_deg: float = 0.0            # upper.pitch - lower.pitch, detects hunching
+
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
@@ -84,6 +147,10 @@ class PostureReading:
             "confidence": self.confidence,
             "duration_s": self.duration_s,
             "deviation_degrees": self.deviation_degrees,
+            "imu_upper": self.imu_upper.to_dict() if self.imu_upper else None,
+            "imu_lower": self.imu_lower.to_dict() if self.imu_lower else None,
+            "lateral_asymmetry_deg": self.lateral_asymmetry_deg,
+            "flexion_deg": self.flexion_deg,
             "timestamp": self.timestamp,
         }
 
@@ -94,6 +161,10 @@ class PostureReading:
             confidence=d["confidence"],
             duration_s=d["duration_s"],
             deviation_degrees=d["deviation_degrees"],
+            imu_upper=IMUReading.from_dict(d["imu_upper"]) if d.get("imu_upper") else None,
+            imu_lower=IMUReading.from_dict(d["imu_lower"]) if d.get("imu_lower") else None,
+            lateral_asymmetry_deg=d.get("lateral_asymmetry_deg", 0.0),
+            flexion_deg=d.get("flexion_deg", 0.0),
             timestamp=d.get("timestamp", time.time()),
         )
 
@@ -209,7 +280,8 @@ class CoachingPlan:
 class HapticCommand:
     pattern: HapticPattern
     reason: str
-    intensity: float  # 0.0 - 1.0
+    intensity: float        # 0.0 - 1.0
+    zone: Optional[VibrationZone] = None  # None = all zones
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
@@ -217,6 +289,7 @@ class HapticCommand:
             "pattern": self.pattern.value,
             "reason": self.reason,
             "intensity": self.intensity,
+            "zone": self.zone.value if self.zone else None,
             "timestamp": self.timestamp,
         }
 
@@ -226,6 +299,39 @@ class HapticCommand:
             pattern=HapticPattern(d["pattern"]),
             reason=d["reason"],
             intensity=d["intensity"],
+            zone=VibrationZone(d["zone"]) if d.get("zone") else None,
+            timestamp=d.get("timestamp", time.time()),
+        )
+
+
+@dataclass
+class EMSCommand:
+    """Command to fire an EMS pulse on a specific muscle channel."""
+    channel: EMSChannel
+    intensity_ma: float     # milliamps — server hard cap: 15.0 mA
+    duration_ms: int        # milliseconds — server hard cap: 3000 ms
+    frequency_hz: float     # stimulation frequency, 20.0–80.0 Hz typical
+    reason: str
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "channel": self.channel.value,
+            "intensity_ma": self.intensity_ma,
+            "duration_ms": self.duration_ms,
+            "frequency_hz": self.frequency_hz,
+            "reason": self.reason,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> EMSCommand:
+        return cls(
+            channel=EMSChannel(d["channel"]),
+            intensity_ma=d["intensity_ma"],
+            duration_ms=d["duration_ms"],
+            frequency_hz=d["frequency_hz"],
+            reason=d["reason"],
             timestamp=d.get("timestamp", time.time()),
         )
 

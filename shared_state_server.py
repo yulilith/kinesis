@@ -38,9 +38,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from schemas import (
     CoachingPlan,
+    EMSChannel,
     HapticPattern,
     InterventionMode,
     StateEntry,
+    VibrationZone,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,12 @@ _discussion_replies: dict[str, str] = {}  # reply content keyed by discussion_id
 # ---------------------------------------------------------------------------
 
 _subscriptions: dict[str, set[ServerSession]] = defaultdict(set)
+
+# EMS cooldown tracking — keyed by channel value, stores last fire timestamp
+_ems_last_fire: dict[str, float] = {}
+EMS_MAX_INTENSITY_MA = 15.0
+EMS_MAX_DURATION_MS  = 3000
+EMS_COOLDOWN_S       = 120.0
 
 
 async def _notify_subscribers(uri: str) -> None:
@@ -224,30 +232,93 @@ async def update_state(device_id: str, key: str, data: dict[str, Any], confidenc
 
 
 @mcp.tool()
-async def send_haptic(pattern: str, reason: str, intensity: float = 0.5) -> str:
+async def send_haptic(pattern: str, reason: str, intensity: float = 0.5,
+                      zone: str = "") -> str:
     """Fire a haptic pattern on the Kinesess device. Deducts from attention budget.
 
     Args:
-        pattern: One of "gentle", "firm", "pulse", "left_nudge", "right_nudge"
+        pattern: One of "gentle", "firm", "pulse", "left_nudge", "right_nudge",
+                 "lumbar_alert", "bilateral"
         reason: Why this haptic is being fired
         intensity: Strength 0.0 to 1.0
+        zone: Target vibration zone — "shoulder_l", "shoulder_r", "lumbar_l",
+              "lumbar_r". Leave empty to fire all zones.
     """
     HapticPattern(pattern)
+    if zone:
+        VibrationZone(zone)  # validate zone value
+
     budget_entry = _state.get(("brain", "attention_budget"))
     remaining = budget_entry.data["remaining"] if budget_entry else 0
     if remaining <= 0:
         return json.dumps({"fired": False, "reason": "attention_budget_exhausted"})
 
-    await _update_and_notify(
-        "kinesess", "last_haptic",
-        {"pattern": pattern, "reason": reason, "intensity": intensity}, 1.0,
-    )
+    payload = {"pattern": pattern, "reason": reason, "intensity": intensity}
+    if zone:
+        payload["zone"] = zone
+
+    await _update_and_notify("kinesess", "last_haptic", payload, 1.0)
     new_remaining = remaining - 1
     await _update_and_notify(
         "brain", "attention_budget",
         {"remaining": new_remaining, "daily_max": budget_entry.data["daily_max"]}, 1.0,
     )
-    return json.dumps({"fired": True, "pattern": pattern, "budget_remaining": new_remaining})
+    return json.dumps({"fired": True, "pattern": pattern, "zone": zone or "all",
+                       "budget_remaining": new_remaining})
+
+
+@mcp.tool()
+async def send_ems(channel: str, intensity_ma: float, duration_ms: int,
+                   frequency_hz: float, reason: str) -> str:
+    """Fire an EMS pulse on a specific muscle channel.
+
+    Safety limits are enforced server-side and cannot be overridden.
+
+    Args:
+        channel: "rhomboid_l", "rhomboid_r", "lumbar_erector_l", "lumbar_erector_r"
+        intensity_ma: Current in milliamps. Hard cap: 15.0 mA.
+        duration_ms: Pulse duration in milliseconds. Hard cap: 3000 ms.
+        frequency_hz: Stimulation frequency in Hz. Typical range: 20.0–80.0.
+        reason: Why this EMS pulse is being fired
+    """
+    EMSChannel(channel)  # validate channel value
+
+    # Hard safety caps — never bypassed
+    intensity_ma = min(intensity_ma, EMS_MAX_INTENSITY_MA)
+    duration_ms  = min(duration_ms,  EMS_MAX_DURATION_MS)
+    frequency_hz = max(20.0, min(frequency_hz, 80.0))
+
+    # Cooldown check per channel
+    last = _ems_last_fire.get(channel, 0.0)
+    elapsed = time.time() - last
+    if elapsed < EMS_COOLDOWN_S:
+        wait = EMS_COOLDOWN_S - elapsed
+        return json.dumps({"fired": False, "reason": "cooldown",
+                           "channel": channel, "wait_s": round(wait, 1)})
+
+    # Budget check — EMS costs 3x a haptic
+    budget_entry = _state.get(("brain", "attention_budget"))
+    remaining = budget_entry.data["remaining"] if budget_entry else 0
+    if remaining < 3:
+        return json.dumps({"fired": False, "reason": "attention_budget_exhausted",
+                           "budget_remaining": remaining})
+
+    _ems_last_fire[channel] = time.time()
+
+    await _update_and_notify(
+        "kinesess", "last_ems",
+        {"channel": channel, "intensity_ma": intensity_ma,
+         "duration_ms": duration_ms, "frequency_hz": frequency_hz,
+         "reason": reason}, 1.0,
+    )
+    new_remaining = remaining - 3
+    await _update_and_notify(
+        "brain", "attention_budget",
+        {"remaining": new_remaining, "daily_max": budget_entry.data["daily_max"]}, 1.0,
+    )
+    return json.dumps({"fired": True, "channel": channel,
+                       "intensity_ma": intensity_ma, "duration_ms": duration_ms,
+                       "frequency_hz": frequency_hz, "budget_remaining": new_remaining})
 
 
 @mcp.tool()
