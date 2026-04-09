@@ -8,9 +8,11 @@ Usage:
         "state":      "http://localhost:8080/mcp",
         "kinesess_hw": "http://localhost:8081/mcp",
         "glasses_hw":  "http://localhost:8082/mcp",
+        "whoop":       "http://localhost:8084/mcp",
     }) as mcp:
         tools = await mcp.claude_tools()
         result = await mcp.call_tool("fire_haptic", {...})
+        biometrics = await mcp.call_tool("get_biometric_summary", {})
 """
 
 from __future__ import annotations

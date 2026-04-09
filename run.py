@@ -1,10 +1,13 @@
 """Kinesis MVP — start all MCP servers and agents.
 
-Architecture: Hardware MCP pattern (4 servers + 3 agents)
+Architecture: Hardware MCP pattern (5 servers + 3 agents)
   Port 8080 — shared_state_server   (blackboard + dashboard)
   Port 8081 — kinesess_mcp_server   (body hardware: haptic, EMS, budget)
   Port 8082 — glasses_mcp_server    (glasses hardware: overlay, scene cache)
   Port 8083 — brain_mcp_server      (coach endpoint: urgent escalation)
+  Port 8084 — whoop_mcp_server      (biometrics: recovery, HRV, sleep, strain)
+                                     mock mode by default — set WHOOP_ACCESS_TOKEN
+                                     env var to use real WHOOP API
 
 Usage:
     # Option 1: Start everything (this script)
@@ -15,9 +18,10 @@ Usage:
     python mcp_servers/kinesess_mcp_server.py        # Terminal 2
     python mcp_servers/glasses_mcp_server.py         # Terminal 3
     python mcp_servers/brain_mcp_server.py           # Terminal 4
-    python agents/context_agent.py                   # Terminal 5
-    python agents/body_agent.py                      # Terminal 6
-    python agents/brain_agent.py                     # Terminal 7
+    python mcp_servers/whoop_mcp_server.py           # Terminal 5
+    python agents/context_agent.py                   # Terminal 6
+    python agents/body_agent.py                      # Terminal 7
+    python agents/brain_agent.py                     # Terminal 8
 
     # Dashboard: http://localhost:8080
 """
@@ -63,6 +67,9 @@ def main():
 
     _start("Brain Coach MCP (8083)",
            [PYTHON, str(KINESIS_DIR / "mcp_servers" / "brain_mcp_server.py")], processes)
+
+    _start("Whoop Biometrics MCP (8084)",
+           [PYTHON, str(KINESIS_DIR / "mcp_servers" / "whoop_mcp_server.py")], processes)
 
     # ------------------------------------------------------------------ agents
     _start("Context Agent (Glasses)",
