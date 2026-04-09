@@ -1,18 +1,12 @@
 """Shared State MCP Server — the blackboard for the Kinesis multi-agent system.
 
-All agents (kinesess, glasses, brain/planner) connect here as MCP clients.
-This server is NOT an agent — it's pure infrastructure: stores state, serves it
-as MCP resources, and pushes subscription notifications when state changes.
+All agents (kinesess, glasses, brain/planner) connect here. This server is NOT
+an agent — it's infrastructure. It stores state, serves it as MCP resources,
+and pushes subscription notifications when state changes.
 
-Hardware tools (fire_haptic, fire_ems, display_overlay) live on the device MCP
-servers (kinesess_mcp_server.py, glasses_mcp_server.py), NOT here. This server
-owns shared coordination state only.
-
-Architecture: Hardware MCP pattern
-  port 8080 — shared_state_server (this file) — blackboard + subscriptions
-  port 8081 — kinesess_mcp_server              — body hardware tools
-  port 8082 — glasses_mcp_server               — glasses hardware tools
-  port 8083 — brain_mcp_server                 — urgent escalation endpoint
+Additions over kinesis-software version:
+- ask_agent / reply_to_agent tools for inter-agent discussion
+- Discussion state tracking for dashboard visibility
 
 Usage:
     python shared_state_server.py              # streamable-http on 0.0.0.0:8080
@@ -43,9 +37,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from schemas import (
-    InterventionMode,
     PlannerStrategy,
+    EMSChannel,
+    HapticPattern,
+    InterventionMode,
     StateEntry,
+    VibrationZone,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,15 +63,23 @@ _state: dict[tuple[str, str], StateEntry] = {}
 # Discussion state — for inter-agent Q&A
 # ---------------------------------------------------------------------------
 
-_pending_discussions: dict[str, list[dict]] = defaultdict(list)  # to_agent → FIFO queue
+_pending_discussions: dict[str, dict] = {}  # keyed by to_agent
 _discussion_events: list[dict] = []  # log of all discussion messages
-_discussion_replies: dict[str, str] = {}  # discussion_id → reply text (deleted after first read)
+_discussion_reply_events: dict[str, asyncio.Event] = {}  # signal when reply arrives
+_discussion_replies: dict[str, str] = {}  # reply content keyed by discussion_id
 
 # ---------------------------------------------------------------------------
 # Subscription registry
 # ---------------------------------------------------------------------------
 
 _subscriptions: dict[str, set[ServerSession]] = defaultdict(set)
+
+# EMS cooldown tracking — keyed by channel value, stores last fire timestamp
+_ems_last_fire: dict[str, float] = {}
+EMS_MAX_INTENSITY_MA = 15.0
+EMS_MAX_DURATION_MS  = 3000
+EMS_COOLDOWN_S       = 120.0
+
 
 async def _notify_subscribers(uri: str) -> None:
     dead: list[ServerSession] = []
@@ -264,17 +269,122 @@ async def update_state(device_id: str, key: str, data: dict[str, Any], confidenc
     return json.dumps(entry.to_dict())
 
 
+@mcp.tool()
+async def send_haptic(pattern: str, reason: str, intensity: float = 0.5,
+                      zone: str = "") -> str:
+    """Fire a haptic pattern on the Kinesess device. Deducts from attention budget.
+
+    Args:
+        pattern: One of "gentle", "firm", "pulse", "left_nudge", "right_nudge",
+                 "lumbar_alert", "bilateral"
+        reason: Why this haptic is being fired
+        intensity: Strength 0.0 to 1.0
+        zone: Target vibration zone — "shoulder_l", "shoulder_r", "lumbar_l",
+              "lumbar_r". Leave empty to fire all zones.
+    """
+    HapticPattern(pattern)
+    if zone:
+        VibrationZone(zone)  # validate zone value
+
+    budget_entry = _state.get(("brain", "attention_budget"))
+    remaining = budget_entry.data["remaining"] if budget_entry else 0
+    if remaining <= 0:
+        return json.dumps({"fired": False, "reason": "attention_budget_exhausted"})
+
+    payload = {"pattern": pattern, "reason": reason, "intensity": intensity}
+    if zone:
+        payload["zone"] = zone
+
+    await _update_and_notify("kinesess", "last_haptic", payload, 1.0)
+    new_remaining = remaining - 1
+    await _update_and_notify(
+        "brain", "attention_budget",
+        {"remaining": new_remaining, "daily_max": budget_entry.data["daily_max"]}, 1.0,
+    )
+    return json.dumps({"fired": True, "pattern": pattern, "zone": zone or "all",
+                       "budget_remaining": new_remaining})
+
+
+@mcp.tool()
+async def send_ems(channel: str, intensity_ma: float, duration_ms: int,
+                   frequency_hz: float, reason: str) -> str:
+    """Fire an EMS pulse on a specific muscle channel.
+
+    Safety limits are enforced server-side and cannot be overridden.
+
+    Args:
+        channel: "rhomboid_l", "rhomboid_r", "lumbar_erector_l", "lumbar_erector_r"
+        intensity_ma: Current in milliamps. Hard cap: 15.0 mA.
+        duration_ms: Pulse duration in milliseconds. Hard cap: 3000 ms.
+        frequency_hz: Stimulation frequency in Hz. Typical range: 20.0–80.0.
+        reason: Why this EMS pulse is being fired
+    """
+    EMSChannel(channel)  # validate channel value
+
+    # Hard safety caps — never bypassed
+    intensity_ma = min(intensity_ma, EMS_MAX_INTENSITY_MA)
+    duration_ms  = min(duration_ms,  EMS_MAX_DURATION_MS)
+    frequency_hz = max(20.0, min(frequency_hz, 80.0))
+
+    # Cooldown check per channel
+    last = _ems_last_fire.get(channel, 0.0)
+    elapsed = time.time() - last
+    if elapsed < EMS_COOLDOWN_S:
+        wait = EMS_COOLDOWN_S - elapsed
+        return json.dumps({"fired": False, "reason": "cooldown",
+                           "channel": channel, "wait_s": round(wait, 1)})
+
+    # Budget check — EMS costs 3x a haptic
+    budget_entry = _state.get(("brain", "attention_budget"))
+    remaining = budget_entry.data["remaining"] if budget_entry else 0
+    if remaining < 3:
+        return json.dumps({"fired": False, "reason": "attention_budget_exhausted",
+                           "budget_remaining": remaining})
+
+    _ems_last_fire[channel] = time.time()
+
+    await _update_and_notify(
+        "kinesess", "last_ems",
+        {"channel": channel, "intensity_ma": intensity_ma,
+         "duration_ms": duration_ms, "frequency_hz": frequency_hz,
+         "reason": reason}, 1.0,
+    )
+    new_remaining = remaining - 3
+    await _update_and_notify(
+        "brain", "attention_budget",
+        {"remaining": new_remaining, "daily_max": budget_entry.data["daily_max"]}, 1.0,
+    )
+    return json.dumps({"fired": True, "channel": channel,
+                       "intensity_ma": intensity_ma, "duration_ms": duration_ms,
+                       "frequency_hz": frequency_hz, "budget_remaining": new_remaining})
+
+
+@mcp.tool()
+async def display_overlay(message: str, duration_ms: int = 3000, position: str = "top") -> str:
+    """Display a text overlay on the AI glasses.
+
+    Args:
+        message: Text to display
+        duration_ms: How long to show it (milliseconds)
+        position: Where on the display — "top", "center", or "bottom"
+    """
+    await _update_and_notify(
+        "glasses", "overlay_command",
+        {"message": message, "duration_ms": duration_ms, "position": position}, 1.0,
+    )
+    return json.dumps({"sent": True, "message": message})
+
+
 # ---------------------------------------------------------------------------
 # MCP Tools — inter-agent discussion
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
 async def ask_agent(from_agent: str, to_agent: str, question: str, context: str = "") -> str:
-    """Ask another agent a question. Returns immediately with a discussion_id.
+    """Ask another agent a question and wait for their reply.
 
-    The caller should poll get_reply(discussion_id) every ~300ms until a reply arrives.
-    The body agent's Python runtime handles this polling transparently — the LLM sees
-    the final reply, not the discussion_id.
+    Use this when you need the other agent's perspective before making a decision.
+    The target agent will be notified, reason about your question, and reply.
 
     Args:
         from_agent: Your agent id ("kinesess" or "glasses")
@@ -282,7 +392,7 @@ async def ask_agent(from_agent: str, to_agent: str, question: str, context: str 
         question: Your question for the other agent
         context: Additional context (JSON string with relevant sensor data)
     """
-    discussion_id = f"{from_agent}_{to_agent}_{int(time.time() * 1000)}"
+    discussion_id = f"{from_agent}_{to_agent}_{time.time()}"
 
     discussion = {
         "id": discussion_id,
@@ -294,11 +404,11 @@ async def ask_agent(from_agent: str, to_agent: str, question: str, context: str 
         "status": "pending",
     }
 
-    # Enqueue — multiple questions can be pending for the same target (Issue 3 fix)
-    _pending_discussions[to_agent].append(discussion)
+    _pending_discussions[to_agent] = discussion
     _discussion_events.append(discussion)
+    _discussion_reply_events[discussion_id] = asyncio.Event()
 
-    # Write to blackboard — triggers subscription notification to target agent
+    # Write to blackboard so target agent sees it via subscription
     await _update_and_notify(
         "discussion", f"pending_{to_agent}",
         discussion, 1.0,
@@ -315,52 +425,46 @@ async def ask_agent(from_agent: str, to_agent: str, question: str, context: str 
         "timestamp": time.time(),
     })
 
-    logger.info("Discussion queued: %s → %s: %s", from_agent, to_agent, question[:100])
+    logger.info("Discussion: %s → %s: %s", from_agent, to_agent, question[:100])
 
-    # Return immediately — no server blocking (Issue 1 fix)
-    return json.dumps({
-        "discussion_id": discussion_id,
-        "status": "queued",
-        "to": to_agent,
-        "note": "Poll get_reply(discussion_id) to retrieve the answer",
-    })
+    # Wait for reply (timeout 30s)
+    try:
+        await asyncio.wait_for(_discussion_reply_events[discussion_id].wait(), timeout=30.0)
+        reply = _discussion_replies.pop(discussion_id, "No reply received.")
+        return json.dumps({"reply": reply, "from": to_agent, "status": "replied"})
+    except asyncio.TimeoutError:
+        return json.dumps({"reply": "Agent did not reply in time.", "from": to_agent, "status": "timeout"})
+    finally:
+        _discussion_reply_events.pop(discussion_id, None)
+        _pending_discussions.pop(to_agent, None)
 
 
 @mcp.tool()
-async def reply_to_agent(from_agent: str, message: str, discussion_id: str = "") -> str:
+async def reply_to_agent(from_agent: str, message: str) -> str:
     """Reply to a pending question from another agent.
 
     Call this when you've been asked a question and have formulated your response.
-    Pass discussion_id (from get_pending_discussion) to target a specific question;
-    omits it to reply to the oldest pending question for your agent.
 
     Args:
         from_agent: Your agent id ("kinesess" or "glasses")
         message: Your reply to the other agent's question
-        discussion_id: Optional — the id field from get_pending_discussion output
     """
-    pending = _pending_discussions.get(from_agent, [])
-    if not pending:
+    # Find the pending discussion targeting this agent
+    discussion = _pending_discussions.get(from_agent)
+    if not discussion:
         return json.dumps({"error": "no_pending_discussion", "from": from_agent})
 
-    # Match by discussion_id if provided; otherwise take the oldest (FIFO)
-    if discussion_id:
-        discussion = next((d for d in pending if d["id"] == discussion_id), pending[0])
-    else:
-        discussion = pending[0]
-
-    matched_id = discussion["id"]
+    discussion_id = discussion["id"]
     asking_agent = discussion["from"]
 
-    # Store reply so get_reply() can return it
-    _discussion_replies[matched_id] = message
-
-    # Remove from queue
-    _pending_discussions[from_agent] = [d for d in pending if d["id"] != matched_id]
+    # Store reply and signal
+    _discussion_replies[discussion_id] = message
+    if discussion_id in _discussion_reply_events:
+        _discussion_reply_events[discussion_id].set()
 
     # Log the reply
     reply_event = {
-        "id": matched_id,
+        "id": discussion_id,
         "from": from_agent,
         "to": asking_agent,
         "reply": message,
@@ -369,7 +473,7 @@ async def reply_to_agent(from_agent: str, message: str, discussion_id: str = "")
     }
     _discussion_events.append(reply_event)
 
-    # Write to blackboard — lets brain agent / dashboard see the reply
+    # Write to blackboard
     await _update_and_notify(
         "discussion", f"reply_{asking_agent}",
         reply_event, 1.0,
@@ -386,40 +490,20 @@ async def reply_to_agent(from_agent: str, message: str, discussion_id: str = "")
     })
 
     logger.info("Discussion reply: %s → %s: %s", from_agent, asking_agent, message[:100])
-    return json.dumps({"sent": True, "to": asking_agent, "discussion_id": matched_id})
+    return json.dumps({"sent": True, "to": asking_agent})
 
 
 @mcp.tool()
 async def get_pending_discussion(agent_id: str) -> str:
-    """Return the oldest pending question for this agent (FIFO).
-
-    The returned object includes an "id" field (discussion_id) that you must pass
-    to reply_to_agent so the reply is routed to the correct caller.
+    """Check if there's a pending question for this agent.
 
     Args:
         agent_id: Your agent id ("kinesess" or "glasses")
     """
-    pending = _pending_discussions.get(agent_id, [])
-    if pending:
-        return json.dumps(pending[0])  # oldest question first
+    discussion = _pending_discussions.get(agent_id)
+    if discussion:
+        return json.dumps(discussion)
     return json.dumps({"pending": False})
-
-
-@mcp.tool()
-async def get_reply(discussion_id: str) -> str:
-    """Check if a reply is available for a queued ask_agent call.
-
-    The body agent's Python runtime calls this automatically after ask_agent —
-    you never need to call this from a system prompt. It is exposed as a tool
-    so the polling loop can use the standard MCP session.call_tool path.
-
-    Args:
-        discussion_id: The discussion_id returned by ask_agent
-    """
-    reply = _discussion_replies.pop(discussion_id, None)  # one-time read, then gone
-    if reply is None:
-        return json.dumps({"status": "pending", "discussion_id": discussion_id})
-    return json.dumps({"status": "replied", "reply": reply, "discussion_id": discussion_id})
 
 
 # ---------------------------------------------------------------------------
@@ -549,13 +633,18 @@ async def api_call_tool(request: Request) -> Response:
                 body["device_id"], body["key"], body["data"], body.get("confidence", 1.0),
             )
             return JSONResponse(result.to_dict())
-        else:
-            return JSONResponse(
-                {"error": f"unknown tool: {tool_name}",
-                 "note": "hardware tools (fire_haptic, fire_ems, display_overlay) "
-                         "moved to device MCP servers on ports 8081/8082"},
-                status_code=404,
+        elif tool_name == "send_haptic":
+            result_json = await send_haptic(
+                body["pattern"], body.get("reason", "dashboard"), body.get("intensity", 0.5),
             )
+            return JSONResponse(json.loads(result_json))
+        elif tool_name == "display_overlay":
+            result_json = await display_overlay(
+                body["message"], body.get("duration_ms", 3000), body.get("position", "top"),
+            )
+            return JSONResponse(json.loads(result_json))
+        else:
+            return JSONResponse({"error": f"unknown tool: {tool_name}"}, status_code=404)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 

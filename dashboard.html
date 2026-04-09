@@ -58,6 +58,30 @@
   .toggle-switch input:checked + .toggle-track { background: #1a3a2a; }
   .toggle-switch input:checked + .toggle-track::after { transform: translateX(18px); background: #98c379; }
 
+  /* Source actions */
+  .source-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .source-actions.scenarios { flex-direction: column; }
+  .action-btn {
+    flex: 1;
+    border: 1px solid #333;
+    background: #111;
+    color: #bbb;
+    padding: 8px 10px;
+    font-size: 0.78em;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .action-btn:hover { border-color: #56b6c2; color: #fff; }
+  .action-btn.replay { border-color: #56b6c2; color: #56b6c2; }
+  .action-btn.scenario { text-align: left; }
+  .action-btn.scenario.active { background: #132029; border-color: #61afef; color: #fff; }
+  .action-btn.scenario small { display: block; color: #666; font-size: 0.9em; margin-top: 4px; text-transform: none; letter-spacing: 0; }
+  .action-btn.mock { border-color: #444; color: #999; }
+  .replay-status { margin-top: 10px; font-size: 0.75em; color: #777; text-transform: uppercase; letter-spacing: 1px; }
+  .replay-status strong { color: #fff; }
+
   /* Main feed */
   .feed { flex: 1; overflow-y: auto; padding: 16px 24px; }
   .feed::-webkit-scrollbar { width: 4px; }
@@ -163,6 +187,19 @@
         <span class="toggle-track"></span>
       </label>
       <span class="toggle-label">ESP32</span>
+    </div>
+  </div>
+
+  <div class="sidebar-section toggle-section">
+    <h3>Replay Control</h3>
+    <div class="source-actions scenarios">
+      <button class="action-btn replay scenario" id="btn-scenario-working">Working<small>desk work, repeated slouch and recovery</small></button>
+      <button class="action-btn replay scenario" id="btn-scenario-meeting">Meeting<small>interview setting, social context, forward lean</small></button>
+      <button class="action-btn replay scenario" id="btn-scenario-walking">Walking<small>street walking, mild side-bend, high motion</small></button>
+    </div>
+    <div class="replay-status">Scenario <strong id="replay-status">--</strong></div>
+    <div class="source-actions">
+      <button class="action-btn mock" id="btn-run-mock">Back to Mock</button>
     </div>
   </div>
 
@@ -377,6 +414,9 @@ function handleState(entry) {
     const mode = data.mode || 'mock';
     toggleEsp32.checked = mode === 'esp32';
   }
+  else if (did === 'kinesess' && key === 'replay_profile') {
+    setReplayStatus(data.profile || '--');
+  }
   else if (did === 'kinesess' && key === 'tension') {
     document.getElementById('ctx-tension').textContent = ((data.level||0)*100).toFixed(0) + '%';
   }
@@ -437,6 +477,9 @@ function handleState(entry) {
   else if (did === 'glasses' && key === 'data_source') {
     const mode = data.mode || 'mock';
     toggleCamera.checked = mode === 'camera';
+  }
+  else if (did === 'glasses' && key === 'replay_profile') {
+    setReplayStatus(data.profile || '--');
   }
   else if (did === 'glasses' && key === 'gaze') {
     // skip — too noisy
@@ -552,27 +595,114 @@ setInterval(async () => {
 // --- Data source toggles ---
 const toggleCamera = document.getElementById('toggle-camera');
 const toggleEsp32 = document.getElementById('toggle-esp32');
+const btnScenarioWorking = document.getElementById('btn-scenario-working');
+const btnScenarioMeeting = document.getElementById('btn-scenario-meeting');
+const btnScenarioWalking = document.getElementById('btn-scenario-walking');
+const btnRunMock = document.getElementById('btn-run-mock');
+const replayStatus = document.getElementById('replay-status');
+
+function setReplayStatus(profile) {
+  replayStatus.textContent = profile || '--';
+  [
+    ['working', btnScenarioWorking],
+    ['meeting', btnScenarioMeeting],
+    ['walking', btnScenarioWalking],
+  ].forEach(([value, button]) => {
+    button.classList.toggle('active', profile === value);
+  });
+}
+
+async function setSourceMode(deviceId, mode) {
+  await fetch('/api/tool/update_state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      device_id: deviceId,
+      key: 'data_source',
+      data: { mode },
+      confidence: 1.0,
+    }),
+  });
+}
+
+async function setReplayProfile(deviceId, profile) {
+  await fetch('/api/tool/update_state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      device_id: deviceId,
+      key: 'replay_profile',
+      data: { profile },
+      confidence: 1.0,
+    }),
+  });
+}
 
 toggleCamera.addEventListener('change', () => {
   const mode = toggleCamera.checked ? 'camera' : 'mock';
-  fetch('/api/tool/update_state', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ device_id: 'glasses', key: 'data_source', data: { mode }, confidence: 1.0 }),
-  }).then(() => {
+  setSourceMode('glasses', mode).then(() => {
     addEvent({ agent: 'system', type: 'scene', message: `Context source switched to <strong>${mode}</strong>` });
   });
 });
 
 toggleEsp32.addEventListener('change', () => {
   const mode = toggleEsp32.checked ? 'esp32' : 'mock';
-  fetch('/api/tool/update_state', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ device_id: 'kinesess', key: 'data_source', data: { mode }, confidence: 1.0 }),
-  }).then(() => {
+  setSourceMode('kinesess', mode).then(() => {
     addEvent({ agent: 'system', type: 'scene', message: `Body source switched to <strong>${mode}</strong>` });
   });
+});
+
+async function activateScenario(profile) {
+  try {
+    await Promise.all([
+      setReplayProfile('glasses', profile),
+      setReplayProfile('kinesess', profile),
+      setSourceMode('glasses', 'replay'),
+      setSourceMode('kinesess', 'replay'),
+    ]);
+    setReplayStatus(profile);
+    toggleCamera.checked = false;
+    toggleEsp32.checked = false;
+    addEvent({
+      agent: 'system',
+      type: 'scene',
+      message: `Switched to <strong>${profile}</strong> replay for both context and body sources`,
+      detail: 'Scenario crafted to surface more agent discussion and decisions',
+    });
+  } catch {
+    addEvent({ agent: 'system', type: 'muted', message: `Failed to switch to ${profile} replay` });
+  }
+}
+
+btnScenarioWorking.addEventListener('click', async () => {
+  await activateScenario('working');
+});
+
+btnScenarioMeeting.addEventListener('click', async () => {
+  await activateScenario('meeting');
+});
+
+btnScenarioWalking.addEventListener('click', async () => {
+  await activateScenario('walking');
+});
+
+btnRunMock.addEventListener('click', async () => {
+  try {
+    await Promise.all([
+      setSourceMode('glasses', 'mock'),
+      setSourceMode('kinesess', 'mock'),
+    ]);
+    setReplayStatus(null);
+    toggleCamera.checked = false;
+    toggleEsp32.checked = false;
+    addEvent({
+      agent: 'system',
+      type: 'scene',
+      message: 'Switched both context and body sources to <strong>mock</strong>',
+    });
+  } catch {
+    addEvent({ agent: 'system', type: 'muted', message: 'Failed to switch to mock mode' });
+  }
 });
 
 // --- Body sensor log ---
@@ -588,6 +718,7 @@ function appendBodySensorLog(data) {
   const t = new Date().toLocaleTimeString();
   const dev = (data.deviation_deg || 0).toFixed(1);
   const tilt = (data.mean_tilt_deg || 0).toFixed(1);
+  const lateral = (data.lateral_deviation_deg || 0).toFixed(1);
   const still = ((data.stillness_score || 0) * 100).toFixed(0);
   const motion = (data.motion_level || 0).toFixed(3);
   const frames = data.num_frames || 0;
@@ -598,6 +729,7 @@ function appendBodySensorLog(data) {
     `<span class="log-time">${t}</span> ` +
     `<span style="color:${devColor};font-weight:700">dev:${dev}\u00B0</span> ` +
     `<span class="log-scores">tilt:${tilt}\u00B0</span> ` +
+    `<span class="log-scores">lat:${lateral}\u00B0</span> ` +
     `<span class="log-scores">still:${still}%</span>` +
     `<br><span class="log-scores">motion:${motion} frames:${frames}</span>`;
 
