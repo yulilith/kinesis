@@ -1,14 +1,23 @@
-"""Kinesis MVP — start the shared state server and all agents.
+"""Kinesis MVP — start all MCP servers and agents.
+
+Architecture: Hardware MCP pattern (4 servers + 3 agents)
+  Port 8080 — shared_state_server   (blackboard + dashboard)
+  Port 8081 — kinesess_mcp_server   (body hardware: haptic, EMS, budget)
+  Port 8082 — glasses_mcp_server    (glasses hardware: overlay, scene cache)
+  Port 8083 — brain_mcp_server      (coach endpoint: urgent escalation)
 
 Usage:
-    # Option 1: Start everything (requires 4 terminals or use this script)
+    # Option 1: Start everything (this script)
     python run.py
 
-    # Option 2: Start each component separately
-    python shared_state_server.py           # Terminal 1: blackboard + dashboard
-    python agents/context_agent.py          # Terminal 2: glasses/context
-    python agents/body_agent.py             # Terminal 3: body/posture
-    python agents/brain_agent.py            # Terminal 4: planner
+    # Option 2: Start each component separately (order matters — servers before agents)
+    python shared_state_server.py                    # Terminal 1
+    python mcp_servers/kinesess_mcp_server.py        # Terminal 2
+    python mcp_servers/glasses_mcp_server.py         # Terminal 3
+    python mcp_servers/brain_mcp_server.py           # Terminal 4
+    python agents/context_agent.py                   # Terminal 5
+    python agents/body_agent.py                      # Terminal 6
+    python agents/brain_agent.py                     # Terminal 7
 
     # Dashboard: http://localhost:8080
 """
@@ -31,40 +40,47 @@ KINESIS_DIR = Path(__file__).resolve().parent
 PYTHON = sys.executable
 
 
+def _start(name: str, cmd: list, processes: list, delay: float = 1.0) -> None:
+    logger.info("Starting %s...", name)
+    proc = subprocess.Popen(cmd)
+    processes.append((name, proc))
+    time.sleep(delay)
+
+
 def main():
     processes = []
 
-    components = [
-        ("Shared State Server", [PYTHON, str(KINESIS_DIR / "shared_state_server.py")]),
-    ]
+    # ------------------------------------------------------------------ servers
+    # Start servers in order — agents will fail to connect if servers aren't up.
+    _start("Shared State Server (8080)",
+           [PYTHON, str(KINESIS_DIR / "shared_state_server.py")], processes, delay=2.0)
 
-    # Start server first, wait for it
-    logger.info("Starting shared state server...")
-    server_proc = subprocess.Popen(
-        components[0][1],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    processes.append(("Shared State Server", server_proc))
-    time.sleep(2)  # let server start
+    _start("Kinesess Hardware MCP (8081)",
+           [PYTHON, str(KINESIS_DIR / "mcp_servers" / "kinesess_mcp_server.py")], processes)
 
-    # Start agents
-    agent_commands = [
-        ("Context Agent (Glasses)", [PYTHON, str(KINESIS_DIR / "agents" / "context_agent.py"), "--demo"]),
-        ("Body Agent (Kinesess)", [PYTHON, str(KINESIS_DIR / "agents" / "body_agent.py"), "--demo"]),
-        # ("Planner Agent", [PYTHON, str(KINESIS_DIR / "agents" / "brain_agent.py")]),  # disabled for now
-    ]
+    _start("Glasses Hardware MCP (8082)",
+           [PYTHON, str(KINESIS_DIR / "mcp_servers" / "glasses_mcp_server.py")], processes)
 
-    for name, cmd in agent_commands:
-        logger.info("Starting %s...", name)
-        proc = subprocess.Popen(cmd)
-        processes.append((name, proc))
-        time.sleep(1)
+    _start("Brain Coach MCP (8083)",
+           [PYTHON, str(KINESIS_DIR / "mcp_servers" / "brain_mcp_server.py")], processes)
+
+    # ------------------------------------------------------------------ agents
+    _start("Context Agent (Glasses)",
+           [PYTHON, str(KINESIS_DIR / "agents" / "context_agent.py"), "--demo"], processes)
+
+    _start("Body Agent (Kinesess)",
+           [PYTHON, str(KINESIS_DIR / "agents" / "body_agent.py"), "--demo"], processes)
+
+    # _start("Planner Agent",
+    #        [PYTHON, str(KINESIS_DIR / "agents" / "brain_agent.py")], processes)
 
     print()
     print("=" * 60)
-    print("  Kinesis Multi-Agent System")
-    print("  Dashboard: http://localhost:8080")
+    print("  Kinesis — Hardware MCP Architecture")
+    print("  Blackboard + Dashboard: http://localhost:8080")
+    print("  Kinesess Hardware MCP:  http://localhost:8081")
+    print("  Glasses Hardware MCP:   http://localhost:8082")
+    print("  Brain Coach MCP:        http://localhost:8083")
     print("  Press Ctrl+C to stop all components")
     print("=" * 60)
     print()

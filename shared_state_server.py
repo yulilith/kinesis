@@ -1,12 +1,18 @@
 """Shared State MCP Server — the blackboard for the Kinesis multi-agent system.
 
-All agents (kinesess, glasses, brain/planner) connect here. This server is NOT
-an agent — it's infrastructure. It stores state, serves it as MCP resources,
-and pushes subscription notifications when state changes.
+All agents (kinesess, glasses, brain/planner) connect here as MCP clients.
+This server is NOT an agent — it's pure infrastructure: stores state, serves it
+as MCP resources, and pushes subscription notifications when state changes.
 
-Additions over kinesis-software version:
-- ask_agent / reply_to_agent tools for inter-agent discussion
-- Discussion state tracking for dashboard visibility
+Hardware tools (fire_haptic, fire_ems, display_overlay) live on the device MCP
+servers (kinesess_mcp_server.py, glasses_mcp_server.py), NOT here. This server
+owns shared coordination state only.
+
+Architecture: Hardware MCP pattern
+  port 8080 — shared_state_server (this file) — blackboard + subscriptions
+  port 8081 — kinesess_mcp_server              — body hardware tools
+  port 8082 — glasses_mcp_server               — glasses hardware tools
+  port 8083 — brain_mcp_server                 — urgent escalation endpoint
 
 Usage:
     python shared_state_server.py              # streamable-http on 0.0.0.0:8080
@@ -37,12 +43,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from schemas import (
-    CoachingPlan,
-    EMSChannel,
-    HapticPattern,
     InterventionMode,
+    PlannerStrategy,
     StateEntry,
-    VibrationZone,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,13 +75,6 @@ _discussion_replies: dict[str, str] = {}  # discussion_id → reply text (delete
 # ---------------------------------------------------------------------------
 
 _subscriptions: dict[str, set[ServerSession]] = defaultdict(set)
-
-# EMS cooldown tracking — keyed by channel value, stores last fire timestamp
-_ems_last_fire: dict[str, float] = {}
-EMS_MAX_INTENSITY_MA = 15.0
-EMS_MAX_DURATION_MS  = 3000
-EMS_COOLDOWN_S       = 120.0
-
 
 async def _notify_subscribers(uri: str) -> None:
     dead: list[ServerSession] = []
@@ -266,112 +262,6 @@ async def update_state(device_id: str, key: str, data: dict[str, Any], confidenc
     """
     entry = await _update_and_notify(device_id, key, data, confidence)
     return json.dumps(entry.to_dict())
-
-
-@mcp.tool()
-async def send_haptic(pattern: str, reason: str, intensity: float = 0.5,
-                      zone: str = "") -> str:
-    """Fire a haptic pattern on the Kinesess device. Deducts from attention budget.
-
-    Args:
-        pattern: One of "gentle", "firm", "pulse", "left_nudge", "right_nudge",
-                 "lumbar_alert", "bilateral"
-        reason: Why this haptic is being fired
-        intensity: Strength 0.0 to 1.0
-        zone: Target vibration zone — "shoulder_l", "shoulder_r", "lumbar_l",
-              "lumbar_r". Leave empty to fire all zones.
-    """
-    HapticPattern(pattern)
-    if zone:
-        VibrationZone(zone)  # validate zone value
-
-    budget_entry = _state.get(("brain", "attention_budget"))
-    remaining = budget_entry.data["remaining"] if budget_entry else 0
-    if remaining <= 0:
-        return json.dumps({"fired": False, "reason": "attention_budget_exhausted"})
-
-    payload = {"pattern": pattern, "reason": reason, "intensity": intensity}
-    if zone:
-        payload["zone"] = zone
-
-    await _update_and_notify("kinesess", "last_haptic", payload, 1.0)
-    new_remaining = remaining - 1
-    await _update_and_notify(
-        "brain", "attention_budget",
-        {"remaining": new_remaining, "daily_max": budget_entry.data["daily_max"]}, 1.0,
-    )
-    return json.dumps({"fired": True, "pattern": pattern, "zone": zone or "all",
-                       "budget_remaining": new_remaining})
-
-
-@mcp.tool()
-async def send_ems(channel: str, intensity_ma: float, duration_ms: int,
-                   frequency_hz: float, reason: str) -> str:
-    """Fire an EMS pulse on a specific muscle channel.
-
-    Safety limits are enforced server-side and cannot be overridden.
-
-    Args:
-        channel: "rhomboid_l", "rhomboid_r", "lumbar_erector_l", "lumbar_erector_r"
-        intensity_ma: Current in milliamps. Hard cap: 15.0 mA.
-        duration_ms: Pulse duration in milliseconds. Hard cap: 3000 ms.
-        frequency_hz: Stimulation frequency in Hz. Typical range: 20.0–80.0.
-        reason: Why this EMS pulse is being fired
-    """
-    EMSChannel(channel)  # validate channel value
-
-    # Hard safety caps — never bypassed
-    intensity_ma = min(intensity_ma, EMS_MAX_INTENSITY_MA)
-    duration_ms  = min(duration_ms,  EMS_MAX_DURATION_MS)
-    frequency_hz = max(20.0, min(frequency_hz, 80.0))
-
-    # Cooldown check per channel
-    last = _ems_last_fire.get(channel, 0.0)
-    elapsed = time.time() - last
-    if elapsed < EMS_COOLDOWN_S:
-        wait = EMS_COOLDOWN_S - elapsed
-        return json.dumps({"fired": False, "reason": "cooldown",
-                           "channel": channel, "wait_s": round(wait, 1)})
-
-    # Budget check — EMS costs 3x a haptic
-    budget_entry = _state.get(("brain", "attention_budget"))
-    remaining = budget_entry.data["remaining"] if budget_entry else 0
-    if remaining < 3:
-        return json.dumps({"fired": False, "reason": "attention_budget_exhausted",
-                           "budget_remaining": remaining})
-
-    _ems_last_fire[channel] = time.time()
-
-    await _update_and_notify(
-        "kinesess", "last_ems",
-        {"channel": channel, "intensity_ma": intensity_ma,
-         "duration_ms": duration_ms, "frequency_hz": frequency_hz,
-         "reason": reason}, 1.0,
-    )
-    new_remaining = remaining - 3
-    await _update_and_notify(
-        "brain", "attention_budget",
-        {"remaining": new_remaining, "daily_max": budget_entry.data["daily_max"]}, 1.0,
-    )
-    return json.dumps({"fired": True, "channel": channel,
-                       "intensity_ma": intensity_ma, "duration_ms": duration_ms,
-                       "frequency_hz": frequency_hz, "budget_remaining": new_remaining})
-
-
-@mcp.tool()
-async def display_overlay(message: str, duration_ms: int = 3000, position: str = "top") -> str:
-    """Display a text overlay on the AI glasses.
-
-    Args:
-        message: Text to display
-        duration_ms: How long to show it (milliseconds)
-        position: Where on the display — "top", "center", or "bottom"
-    """
-    await _update_and_notify(
-        "glasses", "overlay_command",
-        {"message": message, "duration_ms": duration_ms, "position": position}, 1.0,
-    )
-    return json.dumps({"sent": True, "message": message})
 
 
 # ---------------------------------------------------------------------------
@@ -659,18 +549,13 @@ async def api_call_tool(request: Request) -> Response:
                 body["device_id"], body["key"], body["data"], body.get("confidence", 1.0),
             )
             return JSONResponse(result.to_dict())
-        elif tool_name == "send_haptic":
-            result_json = await send_haptic(
-                body["pattern"], body.get("reason", "dashboard"), body.get("intensity", 0.5),
-            )
-            return JSONResponse(json.loads(result_json))
-        elif tool_name == "display_overlay":
-            result_json = await display_overlay(
-                body["message"], body.get("duration_ms", 3000), body.get("position", "top"),
-            )
-            return JSONResponse(json.loads(result_json))
         else:
-            return JSONResponse({"error": f"unknown tool: {tool_name}"}, status_code=404)
+            return JSONResponse(
+                {"error": f"unknown tool: {tool_name}",
+                 "note": "hardware tools (fire_haptic, fire_ems, display_overlay) "
+                         "moved to device MCP servers on ports 8081/8082"},
+                status_code=404,
+            )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 

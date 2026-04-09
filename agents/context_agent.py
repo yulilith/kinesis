@@ -36,8 +36,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env", override=True)
 
 import anthropic
-from mcp.client.streamable_http import streamable_http_client
-from mcp.client.session import ClientSession
+from mcp_client import multi_mcp_session, MultiMCPSession
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -72,7 +71,11 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_SERVER_URL = "http://localhost:8080/mcp"
+DEFAULT_SERVER_URLS = {
+    "state":      "http://localhost:8080/mcp",  # blackboard
+    "glasses_hw": "http://localhost:8082/mcp",  # glasses hardware (display_overlay, update_scene)
+}
+
 SENSOR_INTERVAL_S = 3.0
 LLM_COOLDOWN_S = 10.0
 MAX_TOOL_ROUNDS = 5
@@ -107,9 +110,9 @@ The body agent may ask you whether it should intervene (e.g., "User has bad post
 - Keep responses brief and factual.
 
 ## Available Tools
-- update_state(device_id, key, data, confidence): Write glasses state to blackboard only
-- display_overlay(message, duration_ms, position): Show text on glasses display
-- reply_to_agent(from_agent, message, discussion_id): Reply to a question.
+- update_state(device_id, key, data, confidence): Write glasses state to the shared blackboard
+- display_overlay(message, duration_ms, position): Show text on the glasses hardware display
+- reply_to_agent(from_agent, message, discussion_id): Reply to a question from another agent.
   ALWAYS pass the "id" field from get_pending_discussion as discussion_id.
 - get_pending_discussion(agent_id): Get the oldest pending question (contains "id" field)
 
@@ -135,25 +138,8 @@ class _LocalState:
 # MCP ↔ Claude bridge
 # ---------------------------------------------------------------------------
 
-async def _mcp_tools_to_claude_tools(session: ClientSession) -> list[dict]:
-    result = await session.list_tools()
-    return [
-        {
-            "name": tool.name,
-            "description": tool.description or "",
-            "input_schema": tool.inputSchema,
-        }
-        for tool in result.tools
-    ]
-
-
-async def _execute_tool_call(session: ClientSession, name: str, arguments: dict) -> str:
-    try:
-        result = await session.call_tool(name, arguments)
-        texts = [c.text for c in result.content if hasattr(c, "text")]
-        return "\n".join(texts) if texts else "{}"
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+async def _execute_tool_call(mcp: MultiMCPSession, name: str, arguments: dict) -> str:
+    return await mcp.call_tool(name, arguments)
 
 
 # ---------------------------------------------------------------------------
@@ -161,10 +147,10 @@ async def _execute_tool_call(session: ClientSession, name: str, arguments: dict)
 # ---------------------------------------------------------------------------
 
 class ContextAgent:
-    def __init__(self, server_url: str = DEFAULT_SERVER_URL, demo: bool = False,
+    def __init__(self, server_urls: dict[str, str] | None = None, demo: bool = False,
                  use_camera: bool = False, camera_index: int = 0,
                  clip_model: str = "openai/clip-vit-base-patch32") -> None:
-        self._server_url = server_url
+        self._server_urls = server_urls or DEFAULT_SERVER_URLS
         self._local = _LocalState()
         self._demo = demo
         self._use_camera = use_camera
@@ -176,21 +162,18 @@ class ContextAgent:
     async def run(self) -> None:
         while True:
             try:
-                logger.info("Connecting to %s", self._server_url)
-                async with streamable_http_client(self._server_url) as (r, w, _):
-                    async with ClientSession(r, w) as session:
-                        await session.initialize()
-                        logger.info("Connected to shared state server")
-                        await self._run_with_session(session)
+                logger.info("Connecting to MCP servers: %s", list(self._server_urls.keys()))
+                async with multi_mcp_session(self._server_urls) as mcp:
+                    logger.info("Connected to all MCP servers")
+                    await self._run_with_session(mcp)
             except Exception as e:
                 logger.error("Connection lost: %s — reconnecting in 3s", e)
                 await asyncio.sleep(3)
 
-    async def _run_with_session(self, session: ClientSession) -> None:
-        sensor_task = asyncio.create_task(self._sensor_loop(session))
-        llm_task = asyncio.create_task(self._llm_loop(session))
-        # Dedicated 250ms watcher for discussion questions (Issue 2 fix)
-        discussion_task = asyncio.create_task(self._discussion_watcher(session))
+    async def _run_with_session(self, mcp: MultiMCPSession) -> None:
+        sensor_task = asyncio.create_task(self._sensor_loop(mcp))
+        llm_task = asyncio.create_task(self._llm_loop(mcp))
+        discussion_task = asyncio.create_task(self._discussion_watcher(mcp))
         try:
             await asyncio.gather(sensor_task, llm_task, discussion_task)
         finally:
@@ -257,15 +240,11 @@ class ContextAgent:
         )
         return ctx, result
 
-    async def _check_data_source(self, session: ClientSession) -> str:
+    async def _check_data_source(self, mcp: MultiMCPSession) -> str:
         """Read the data_source toggle from the blackboard (set by dashboard)."""
-        try:
-            result = await session.read_resource("state://glasses/data_source")
-            content = result.contents[0]
-            data = json.loads(content.text if hasattr(content, "text") else str(content))
-            return data.get("data", {}).get("mode", "mock")
-        except Exception:
-            return "camera" if self._use_camera else "mock"
+        data = await mcp.read_resource("state://glasses/data_source")
+        mode = data.get("data", {}).get("mode") if data else None
+        return mode or ("camera" if self._use_camera else "mock")
 
     def _stop_camera(self) -> None:
         if self._camera:
@@ -279,7 +258,7 @@ class ContextAgent:
         AVFoundation's requirement that VideoCapture is opened on the main thread."""
         self._init_camera()
 
-    async def _sensor_loop(self, session: ClientSession) -> None:
+    async def _sensor_loop(self, mcp: MultiMCPSession) -> None:
         # Init mock sensors (always available as fallback)
         mock_scene = MockSceneSensor(scripted=DEMO_TIMELINE if self._demo else None)
         mock_gaze = MockGazeSensor(scene_sensor=mock_scene)
@@ -288,7 +267,7 @@ class ContextAgent:
 
         while True:
             # Check dashboard toggle
-            requested_mode = await self._check_data_source(session)
+            requested_mode = await self._check_data_source(mcp)
 
             if requested_mode != active_mode:
                 logger.info("Switching data source: %s → %s", active_mode, requested_mode)
@@ -310,11 +289,24 @@ class ContextAgent:
             self._local.last_gaze = gaze
 
             # Write to blackboard
-            await self._safe_update(session, "context", scene_ctx.to_dict(), scene_ctx.confidence)
+            await self._safe_update(mcp, "context", scene_ctx.to_dict(), scene_ctx.confidence)
             if clip_result is not None:
-                await self._safe_update(session, "sensor_log", clip_result, scene_ctx.confidence)
+                await self._safe_update(mcp, "sensor_log", clip_result, scene_ctx.confidence)
             if gaze is not None:
-                await self._safe_update(session, "gaze", gaze.to_dict(), gaze.confidence)
+                await self._safe_update(mcp, "gaze", gaze.to_dict(), gaze.confidence)
+
+            # Cache scene on glasses hardware server for direct queries
+            await mcp.call_tool("update_scene", {
+                "scene": scene_ctx.scene.value,
+                "confidence": scene_ctx.confidence,
+                "social": scene_ctx.social,
+                "ambient_noise_db": scene_ctx.ambient_noise_db,
+            })
+            if gaze is not None:
+                await mcp.call_tool("update_gaze", {
+                    "target": gaze.target.value,
+                    "confidence": gaze.confidence,
+                })
 
             # Detect scene change
             if self._local.last_scene != scene_ctx.scene:
@@ -327,50 +319,34 @@ class ContextAgent:
                         self._local.trigger_reason = f"scene_change_{old_scene.value}_to_{scene_ctx.scene.value}"
                         self._local.llm_trigger.set()
 
-            # Discussion polling handled by _discussion_watcher (250ms interval, not here)
-
             await asyncio.sleep(SENSOR_INTERVAL_S)
 
-    async def _safe_update(self, session: ClientSession, key: str, data: dict, confidence: float) -> None:
-        try:
-            await session.call_tool("update_state", {
-                "device_id": "glasses", "key": key,
-                "data": data, "confidence": confidence,
-            })
-        except Exception as e:
-            logger.warning("Blackboard write %s failed: %s", key, e)
+    async def _safe_update(self, mcp: MultiMCPSession, key: str, data: dict, confidence: float) -> None:
+        await mcp.call_tool("update_state", {
+            "device_id": "glasses", "key": key,
+            "data": data, "confidence": confidence,
+        })
 
-    async def _check_pending_discussion(self, session: ClientSession) -> None:
+    async def _check_pending_discussion(self, mcp: MultiMCPSession) -> None:
         """Check if another agent asked us a question."""
-        try:
-            result = await session.call_tool("get_pending_discussion", {"agent_id": "glasses"})
-            texts = [c.text for c in result.content if hasattr(c, "text")]
-            response_text = texts[0] if texts else "{}"
-            data = json.loads(response_text)
+        raw = await mcp.call_tool("get_pending_discussion", {"agent_id": "glasses"})
+        data = json.loads(raw)
+        if data.get("pending") is not False and "question" in data:
+            self._local.trigger_reason = f"discussion_from_{data['from']}"
+            if not self._local.llm_trigger.is_set():
+                self._local.llm_trigger.set()
 
-            if data.get("pending") is not False and "question" in data:
-                self._local.trigger_reason = f"discussion_from_{data['from']}"
-                if not self._local.llm_trigger.is_set():
-                    self._local.llm_trigger.set()
-        except Exception:
-            pass  # non-critical
-
-    async def _discussion_watcher(self, session: ClientSession) -> None:
-        """Poll for pending questions every 250ms.
-
-        Replaces the per-tick check in _sensor_loop (which ran every 3s).
-        <250ms latency instead of up to 3s — avoids blocking body agent for
-        longer than necessary while waiting for a reply.
-        """
+    async def _discussion_watcher(self, mcp: MultiMCPSession) -> None:
+        """Poll for pending questions every 250ms."""
         while True:
-            await self._check_pending_discussion(session)
+            await self._check_pending_discussion(mcp)
             await asyncio.sleep(0.25)
 
     # -- slow path: LLM decision loop --
 
-    async def _llm_loop(self, session: ClientSession) -> None:
+    async def _llm_loop(self, mcp: MultiMCPSession) -> None:
         claude = anthropic.AsyncAnthropic()
-        claude_tools = await _mcp_tools_to_claude_tools(session)
+        claude_tools = await mcp.claude_tools()
 
         while True:
             await self._local.llm_trigger.wait()
@@ -378,7 +354,7 @@ class ContextAgent:
 
             try:
                 self._local.last_llm_time = time.time()
-                system_prompt = await self._load_system_prompt(session)
+                system_prompt = await self._load_system_prompt(mcp)
                 user_msg = self._build_user_message()
 
                 logger.info("LLM triggered: %s", self._local.trigger_reason)
@@ -400,7 +376,7 @@ class ContextAgent:
                     tool_results = []
                     for block in response.content:
                         if block.type == "tool_use":
-                            result_text = await _execute_tool_call(session, block.name, block.input)
+                            result_text = await _execute_tool_call(mcp, block.name, block.input)
                             tool_results.append({
                                 "type": "tool_result",
                                 "tool_use_id": block.id,
@@ -414,20 +390,12 @@ class ContextAgent:
                 if text_parts:
                     reasoning = " ".join(text_parts)
                     logger.info("LLM decision: %s", reasoning)
-                    try:
-                        await session.call_tool("update_state", {
-                            "device_id": "glasses",
-                            "key": "last_decision",
-                            "data": {
-                                "trigger": self._local.trigger_reason,
-                                "reasoning": reasoning,
-                                "timestamp": time.time(),
-                            },
-                            "confidence": 1.0,
-                        })
-                        logger.info("Decision posted to blackboard")
-                    except Exception as e:
-                        logger.error("Failed to post decision to blackboard: %s", e)
+                    await mcp.call_tool("update_state", {
+                        "device_id": "glasses", "key": "last_decision",
+                        "data": {"trigger": self._local.trigger_reason,
+                                 "reasoning": reasoning, "timestamp": time.time()},
+                        "confidence": 1.0,
+                    })
 
             except anthropic.APIError as e:
                 logger.error("Claude API error: %s", e)
@@ -436,17 +404,10 @@ class ContextAgent:
 
     # -- helpers --
 
-    async def _load_system_prompt(self, session: ClientSession) -> str:
-        try:
-            result = await session.read_resource("state://glasses/system_prompt")
-            content = result.contents[0]
-            data = json.loads(content.text if hasattr(content, "text") else str(content))
-            prompt = data.get("data", {}).get("prompt", "")
-            if prompt:
-                return prompt
-        except Exception:
-            pass
-        return DEFAULT_SYSTEM_PROMPT
+    async def _load_system_prompt(self, mcp: MultiMCPSession) -> str:
+        data = await mcp.read_resource("state://glasses/system_prompt")
+        prompt = data.get("data", {}).get("prompt", "") if data else ""
+        return prompt or DEFAULT_SYSTEM_PROMPT
 
     def _build_user_message(self) -> str:
         sc = self._local.last_scene_context
@@ -490,7 +451,8 @@ if __name__ == "__main__":
     )
 
     parser = argparse.ArgumentParser(description="Glasses context agent")
-    parser.add_argument("--server", default=DEFAULT_SERVER_URL)
+    parser.add_argument("--state-server",   default=DEFAULT_SERVER_URLS["state"])
+    parser.add_argument("--glasses-server", default=DEFAULT_SERVER_URLS["glasses_hw"])
     parser.add_argument("--demo", action="store_true", help="Use faster scene timeline for demos")
     parser.add_argument("--camera", action="store_true", help="Use real camera + CLIP instead of mock sensors")
     parser.add_argument("--camera-index", type=int, default=0, help="Camera device index")
@@ -498,7 +460,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     agent = ContextAgent(
-        server_url=args.server,
+        server_urls={
+            "state":      args.state_server,
+            "glasses_hw": args.glasses_server,
+        },
         demo=args.demo,
         use_camera=args.camera,
         camera_index=args.camera_index,
