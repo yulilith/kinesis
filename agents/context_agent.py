@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from schemas import SceneType, SceneContext
 from ble.mock_sensors import MockSceneSensor, MockGazeSensor
+from mock_replay import ReplayContextSource
 
 # Teammate's real camera + CLIP inference (context-agent/python/)
 CONTEXT_AGENT_DIR = str(Path(__file__).resolve().parent.parent / "context-agent" / "python")
@@ -162,15 +163,19 @@ async def _execute_tool_call(session: ClientSession, name: str, arguments: dict)
 class ContextAgent:
     def __init__(self, server_url: str = DEFAULT_SERVER_URL, demo: bool = False,
                  use_camera: bool = False, camera_index: int = 0,
-                 clip_model: str = "openai/clip-vit-base-patch32") -> None:
+                 clip_model: str = "openai/clip-vit-base-patch32",
+                 replay_dataset: str | None = None) -> None:
         self._server_url = server_url
         self._local = _LocalState()
         self._demo = demo
         self._use_camera = use_camera
         self._camera_index = camera_index
         self._clip_model = clip_model
+        self._replay_dataset = replay_dataset
+        self._replay_profile = None
         self._camera = None
         self._inferencer = None
+        self._replay_source = ReplayContextSource(replay_dataset) if replay_dataset else None
 
     async def run(self) -> None:
         while True:
@@ -259,9 +264,24 @@ class ContextAgent:
             result = await session.read_resource("state://glasses/data_source")
             content = result.contents[0]
             data = json.loads(content.text if hasattr(content, "text") else str(content))
-            return data.get("data", {}).get("mode", "mock")
+            mode = data.get("data", {}).get("mode")
+            if mode:
+                return mode
         except Exception:
-            return "camera" if self._use_camera else "mock"
+            pass
+
+        if self._replay_source is not None:
+            return "replay"
+        return "camera" if self._use_camera else "mock"
+
+    async def _check_replay_profile(self, session: ClientSession) -> str | None:
+        try:
+            result = await session.read_resource("state://glasses/replay_profile")
+            content = result.contents[0]
+            data = json.loads(content.text if hasattr(content, "text") else str(content))
+            return data.get("data", {}).get("profile")
+        except Exception:
+            return None
 
     def _stop_camera(self) -> None:
         if self._camera:
@@ -280,22 +300,42 @@ class ContextAgent:
         mock_scene = MockSceneSensor(scripted=DEMO_TIMELINE if self._demo else None)
         mock_gaze = MockGazeSensor(scene_sensor=mock_scene)
 
-        active_mode = "camera" if self._camera is not None else "mock"
+        if self._replay_source is not None:
+            self._replay_source.reset()
+            active_mode = "replay"
+            self._replay_profile = self._replay_dataset
+        else:
+            active_mode = "camera" if self._camera is not None else "mock"
 
         while True:
             # Check dashboard toggle
             requested_mode = await self._check_data_source(session)
+            requested_profile = await self._check_replay_profile(session)
 
             if requested_mode != active_mode:
                 logger.info("Switching data source: %s → %s", active_mode, requested_mode)
-                if requested_mode == "camera" and self._camera is None:
+                if requested_mode == "replay":
+                    if self._replay_source is None:
+                        logger.warning("Replay dataset not available — staying on %s", active_mode)
+                        requested_mode = active_mode
+                    else:
+                        self._replay_source.reset()
+                elif requested_mode == "camera" and self._camera is None:
                     logger.warning("Camera not available — staying on mock")
                     requested_mode = "mock"
                 active_mode = requested_mode
 
+            if active_mode == "replay" and requested_profile and self._replay_source is not None and requested_profile != self._replay_profile:
+                changed = self._replay_source.set_dataset(requested_profile)
+                self._replay_profile = requested_profile
+                if changed:
+                    logger.info("Context replay profile switched to %s", requested_profile)
+
             # Read from active source
             clip_result = None
-            if active_mode == "camera" and self._camera is not None:
+            if active_mode == "replay" and self._replay_source is not None:
+                scene_ctx, gaze, clip_result = self._replay_source.read()
+            elif active_mode == "camera" and self._camera is not None:
                 scene_ctx, clip_result = await asyncio.to_thread(self._camera_to_scene_context)
                 gaze = None
             else:
@@ -481,6 +521,7 @@ if __name__ == "__main__":
     parser.add_argument("--camera", action="store_true", help="Use real camera + CLIP instead of mock sensors")
     parser.add_argument("--camera-index", type=int, default=0, help="Camera device index")
     parser.add_argument("--clip-model", default="openai/clip-vit-base-patch32", help="HuggingFace CLIP model name")
+    parser.add_argument("--replay-dataset", help="Path to local replay dataset JSON for context playback")
     args = parser.parse_args()
 
     agent = ContextAgent(
@@ -489,11 +530,12 @@ if __name__ == "__main__":
         use_camera=args.camera,
         camera_index=args.camera_index,
         clip_model=args.clip_model,
+        replay_dataset=args.replay_dataset,
     )
 
     # Only init camera on main thread if requested via CLI.
     # Dashboard toggle can still switch to camera if it was pre-initialized.
-    if args.camera:
+    if args.camera and not args.replay_dataset:
         agent.pre_init_camera()
 
     asyncio.run(agent.run())
