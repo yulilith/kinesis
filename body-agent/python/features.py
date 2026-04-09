@@ -15,6 +15,13 @@ def estimate_tilt_deg(ax: float, ay: float, az: float) -> float:
     return math.degrees(tilt_rad)
 
 
+def estimate_lateral_tilt_deg(ax: float, ay: float, az: float) -> float:
+    """Approximate left/right lean from gravity direction."""
+    denom = math.sqrt(ax * ax + az * az) + 1e-6
+    tilt_rad = math.atan2(ay, denom)
+    return math.degrees(tilt_rad)
+
+
 def compute_motion_level(frames: List[Dict]) -> float:
     if len(frames) < 2:
         return 0.0
@@ -36,8 +43,11 @@ def compute_features(frames: List[Dict], baseline_tilt_deg: float = 0.0) -> Dict
         return {
             "ok": False,
             "tilt_deg": 0.0,
+            "lateral_tilt_deg": 0.0,
             "mean_tilt_deg": 0.0,
+            "mean_lateral_tilt_deg": 0.0,
             "deviation_deg": 0.0,
+            "lateral_deviation_deg": 0.0,
             "motion_level": 0.0,
             "stillness_score": 0.0,
             "num_frames": 0,
@@ -51,8 +61,17 @@ def compute_features(frames: List[Dict], baseline_tilt_deg: float = 0.0) -> Dict
         )
         for frame in frames
     ]
+    lateral_tilts = [
+        estimate_lateral_tilt_deg(
+            frame.get("ax", 0.0),
+            frame.get("ay", 0.0),
+            frame.get("az", 0.0),
+        )
+        for frame in frames
+    ]
 
     mean_tilt = sum(tilts) / len(tilts)
+    mean_lateral_tilt = sum(lateral_tilts) / len(lateral_tilts)
     motion_level = compute_motion_level(frames)
 
     # 这里简单把低运动视为更静止
@@ -61,8 +80,11 @@ def compute_features(frames: List[Dict], baseline_tilt_deg: float = 0.0) -> Dict
     return {
         "ok": True,
         "tilt_deg": tilts[-1],
+        "lateral_tilt_deg": lateral_tilts[-1],
         "mean_tilt_deg": mean_tilt,
+        "mean_lateral_tilt_deg": mean_lateral_tilt,
         "deviation_deg": mean_tilt - baseline_tilt_deg,
+        "lateral_deviation_deg": mean_lateral_tilt,
         "motion_level": motion_level,
         "stillness_score": stillness_score,
         "num_frames": len(frames),

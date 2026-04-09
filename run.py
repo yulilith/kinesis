@@ -25,6 +25,8 @@ import signal
 import time
 from pathlib import Path
 
+from mock_replay import resolve_replay_dataset
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)-20s %(levelname)s %(message)s",
@@ -55,23 +57,11 @@ def _check_runtime_dependencies() -> None:
 
 
 def _resolve_replay_dataset(dataset_arg: str) -> str:
-    candidate = Path(dataset_arg)
-    if candidate.is_absolute():
-        resolved = candidate
-    else:
-        search_paths = [
-            KINESIS_DIR / candidate,
-            KINESIS_DIR / "mock_data" / candidate,
-        ]
-        resolved = next((path for path in search_paths if path.exists()), search_paths[0])
-
-    if not resolved.exists():
-        logger.error("Replay dataset not found: %s", dataset_arg)
-        logger.error("Checked: %s", resolved)
-        logger.error("Available datasets in mock_data/: %s", ", ".join(sorted(p.name for p in (KINESIS_DIR / 'mock_data').glob('*.json'))))
+    try:
+        return str(resolve_replay_dataset(dataset_arg).resolve())
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
         raise SystemExit(1)
-
-    return str(resolved.resolve())
 
 
 def main():
@@ -109,7 +99,7 @@ def main():
     agent_commands = [
         ("Context Agent (Glasses)", context_cmd),
         ("Body Agent (Kinesess)", body_cmd),
-        # ("Planner Agent", [PYTHON, str(KINESIS_DIR / "agents" / "brain_agent.py")]),  # disabled for now
+        ("Planner Agent", [PYTHON, str(KINESIS_DIR / "agents" / "brain_agent.py")]),
     ]
 
     for name, cmd in agent_commands:

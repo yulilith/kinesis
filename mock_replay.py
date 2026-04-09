@@ -9,9 +9,37 @@ from typing import Any
 from schemas import GazeReading, SceneContext
 
 
+REPLAY_DATASET_DIR = Path(__file__).resolve().parent / "mock_data"
+REPLAY_PROFILE_PATHS = {
+    "working": REPLAY_DATASET_DIR / "desk_work_focus_5min.json",
+    "meeting": REPLAY_DATASET_DIR / "interview_forward_lean_5min.json",
+    "walking": REPLAY_DATASET_DIR / "street_walk_sidebend_5min.json",
+}
+
+
+def resolve_replay_dataset(dataset_ref: str) -> Path:
+    candidate = Path(dataset_ref)
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+
+    if dataset_ref in REPLAY_PROFILE_PATHS:
+        return REPLAY_PROFILE_PATHS[dataset_ref]
+
+    search_paths = [
+        Path(__file__).resolve().parent / candidate,
+        REPLAY_DATASET_DIR / candidate,
+    ]
+    for path in search_paths:
+        if path.exists():
+            return path
+
+    available = ", ".join(sorted(REPLAY_PROFILE_PATHS))
+    raise FileNotFoundError(f"Replay dataset not found: {dataset_ref}. Available profiles: {available}")
+
+
 class ReplayDataset:
     def __init__(self, dataset_path: str) -> None:
-        self.path = Path(dataset_path)
+        self.path = resolve_replay_dataset(dataset_path)
         payload = json.loads(self.path.read_text())
 
         self.meta = payload.get("meta", {})
@@ -71,9 +99,20 @@ class ReplayDataset:
 class ReplayContextSource:
     def __init__(self, dataset_path: str) -> None:
         self._dataset = ReplayDataset(dataset_path)
+        self.dataset_ref = dataset_path
 
     def reset(self) -> None:
         self._dataset.reset()
+
+    def set_dataset(self, dataset_ref: str) -> bool:
+        resolved = resolve_replay_dataset(dataset_ref)
+        if resolved == self._dataset.path:
+            self.reset()
+            self.dataset_ref = dataset_ref
+            return False
+        self._dataset = ReplayDataset(str(resolved))
+        self.dataset_ref = dataset_ref
+        return True
 
     def read(self) -> tuple[SceneContext, GazeReading | None, dict[str, Any]]:
         sample = self._dataset.get_current_context_sample()
@@ -98,6 +137,7 @@ class ReplayContextSource:
 class ReplayIMUBridge:
     def __init__(self, dataset_path: str) -> None:
         self._dataset = ReplayDataset(dataset_path)
+        self.dataset_ref = dataset_path
         self._running = False
 
     def start_streaming(self, reset: bool = True) -> None:
@@ -107,6 +147,20 @@ class ReplayIMUBridge:
 
     def stop(self) -> None:
         self._running = False
+
+    def set_dataset(self, dataset_ref: str, reset: bool = True) -> bool:
+        resolved = resolve_replay_dataset(dataset_ref)
+        if resolved == self._dataset.path:
+            if reset:
+                self._dataset.reset()
+            self.dataset_ref = dataset_ref
+            return False
+        self._dataset = ReplayDataset(str(resolved))
+        self.dataset_ref = dataset_ref
+        self._running = True
+        if reset:
+            self._dataset.reset()
+        return True
 
     def get_recent_frames(self, window_ms: int = 1000) -> list[dict[str, Any]]:
         if not self._running:

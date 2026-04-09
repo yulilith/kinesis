@@ -54,6 +54,17 @@ def _deviation_to_posture(dev_deg: float) -> PostureClass:
     else:
         return PostureClass.LEANING_LEFT if abs_dev < 20 else PostureClass.LEANING_RIGHT
 
+
+def _classify_posture(forward_dev_deg: float, lateral_dev_deg: float) -> tuple[PostureClass, float]:
+    lateral_abs = abs(lateral_dev_deg)
+    forward_abs = abs(forward_dev_deg)
+
+    if lateral_abs >= 7.0 and lateral_abs >= (forward_abs * 0.9):
+        posture = PostureClass.LEANING_RIGHT if lateral_dev_deg > 0 else PostureClass.LEANING_LEFT
+        return posture, lateral_abs
+
+    return _deviation_to_posture(forward_dev_deg), forward_abs
+
 # Scripted demo: good(15s) → slouching(35s) → good(12s) → hunched(30s) → leaning(25s) → good(15s) → repeat
 # LLM triggers after BAD_POSTURE_THRESHOLD_S of sustained bad posture
 DEMO_POSTURE_TIMELINE = [
@@ -194,6 +205,7 @@ class BodyAgent:
         self._use_esp32 = use_esp32
         self._serial_port = serial_port
         self._replay_dataset = replay_dataset
+        self._replay_profile = None
         self._esp32 = None
         self._replay_bridge = ReplayIMUBridge(replay_dataset) if replay_dataset else None
         self._baseline_tilt: float = 0.0
@@ -241,6 +253,15 @@ class BodyAgent:
         self._baseline_tilt = 0.0
         self._baseline_calibrated = False
 
+    async def _check_replay_profile(self, session: ClientSession) -> str | None:
+        try:
+            result = await session.read_resource("state://kinesess/replay_profile")
+            content = result.contents[0]
+            data = json.loads(content.text if hasattr(content, "text") else str(content))
+            return data.get("data", {}).get("profile")
+        except Exception:
+            return None
+
     def _frames_to_readings(self, frames: list[dict]) -> tuple[PostureReading, TensionReading, dict]:
         from features import compute_features
 
@@ -260,15 +281,16 @@ class BodyAgent:
             feats["deviation_deg"] = 0.0
             logger.info("Baseline calibrated: %.1f°", self._baseline_tilt)
 
-        dev = feats["deviation_deg"]
-        posture_cls = _deviation_to_posture(dev)
+        forward_dev = feats["deviation_deg"]
+        lateral_dev = feats.get("lateral_deviation_deg", 0.0)
+        posture_cls, deviation_scalar = _classify_posture(forward_dev, lateral_dev)
         confidence = min(1.0, feats["num_frames"] / 20.0)
 
         posture = PostureReading(
             classification=posture_cls,
             confidence=confidence,
             duration_s=0.0,  # tracked by the sensor loop
-            deviation_degrees=abs(dev),
+            deviation_degrees=deviation_scalar,
         )
 
         # Stillness inversely maps to tension (moving = less tense)
@@ -312,12 +334,14 @@ class BodyAgent:
         if self._replay_bridge is not None:
             self._replay_bridge.start_streaming()
             active_mode = "replay"
+            self._replay_profile = self._replay_dataset
         else:
             active_mode = "esp32" if self._esp32 is not None else "mock"
 
         while True:
             # Check dashboard toggle
             requested_mode = await self._check_data_source(session)
+            requested_profile = await self._check_replay_profile(session)
             if requested_mode != active_mode:
                 if requested_mode == "replay":
                     if self._replay_bridge is None:
@@ -335,6 +359,13 @@ class BodyAgent:
                         self._reset_baseline()
                     logger.info("Switching body data source: %s → %s", active_mode, requested_mode)
                 active_mode = requested_mode
+
+            if active_mode == "replay" and requested_profile and self._replay_bridge is not None and requested_profile != self._replay_profile:
+                changed = self._replay_bridge.set_dataset(requested_profile, reset=True)
+                self._reset_baseline()
+                self._replay_profile = requested_profile
+                if changed:
+                    logger.info("Body replay profile switched to %s", requested_profile)
 
             # Read from active source
             imu_feats = None

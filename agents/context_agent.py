@@ -172,6 +172,7 @@ class ContextAgent:
         self._camera_index = camera_index
         self._clip_model = clip_model
         self._replay_dataset = replay_dataset
+        self._replay_profile = None
         self._camera = None
         self._inferencer = None
         self._replay_source = ReplayContextSource(replay_dataset) if replay_dataset else None
@@ -273,6 +274,15 @@ class ContextAgent:
             return "replay"
         return "camera" if self._use_camera else "mock"
 
+    async def _check_replay_profile(self, session: ClientSession) -> str | None:
+        try:
+            result = await session.read_resource("state://glasses/replay_profile")
+            content = result.contents[0]
+            data = json.loads(content.text if hasattr(content, "text") else str(content))
+            return data.get("data", {}).get("profile")
+        except Exception:
+            return None
+
     def _stop_camera(self) -> None:
         if self._camera:
             self._camera.stop()
@@ -293,12 +303,14 @@ class ContextAgent:
         if self._replay_source is not None:
             self._replay_source.reset()
             active_mode = "replay"
+            self._replay_profile = self._replay_dataset
         else:
             active_mode = "camera" if self._camera is not None else "mock"
 
         while True:
             # Check dashboard toggle
             requested_mode = await self._check_data_source(session)
+            requested_profile = await self._check_replay_profile(session)
 
             if requested_mode != active_mode:
                 logger.info("Switching data source: %s → %s", active_mode, requested_mode)
@@ -312,6 +324,12 @@ class ContextAgent:
                     logger.warning("Camera not available — staying on mock")
                     requested_mode = "mock"
                 active_mode = requested_mode
+
+            if active_mode == "replay" and requested_profile and self._replay_source is not None and requested_profile != self._replay_profile:
+                changed = self._replay_source.set_dataset(requested_profile)
+                self._replay_profile = requested_profile
+                if changed:
+                    logger.info("Context replay profile switched to %s", requested_profile)
 
             # Read from active source
             clip_result = None
