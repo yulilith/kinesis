@@ -649,6 +649,33 @@ async def api_call_tool(request: Request) -> Response:
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+@mcp.custom_route("/api/demo_restart", methods=["POST"])
+async def api_demo_restart(request: Request) -> Response:
+    """Bump the demo_reset version so agents restart their timelines."""
+    entry = await _update_and_notify(
+        "system", "demo_reset", {"timestamp": time.time()}, 1.0,
+    )
+    return JSONResponse({"ok": True, "version": entry.version})
+
+
+@mcp.custom_route("/api/server_health", methods=["GET"])
+async def api_server_health(request: Request) -> Response:
+    """Probe MCP server ports and report which are up."""
+    import socket
+    ports = {"8080": "Shared State", "8081": "Kinesess HW",
+             "8082": "Glasses HW", "8083": "Brain Coach", "8084": "Whoop Bio"}
+    results = {}
+    for port_str, name in ports.items():
+        port = int(port_str)
+        try:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=0.3)
+            sock.close()
+            results[port_str] = True
+        except (ConnectionRefusedError, OSError, TimeoutError):
+            results[port_str] = False
+    return JSONResponse(results)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------

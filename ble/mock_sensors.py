@@ -92,6 +92,10 @@ class _ScriptedTimeline(Generic[T]):
         self._start_time = time.time()
         self._total_duration = sum(d for d, _ in timeline)
 
+    def reset(self) -> None:
+        """Restart the timeline from the beginning."""
+        self._start_time = time.time()
+
     def current(self) -> T:
         elapsed = (time.time() - self._start_time) % self._total_duration
         accumulated = 0.0

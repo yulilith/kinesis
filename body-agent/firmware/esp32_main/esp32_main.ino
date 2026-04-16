@@ -1,53 +1,64 @@
 #include <Wire.h>
 #include <ArduinoJson.h>
 
+// --- Pin & config ---
 const int VIBRATION_PIN = 4;
 const int SAMPLE_INTERVAL_MS = 40;  // ~25Hz
-const int MPU_ADDR = 0x68;
+
+// Two MPU6050s on the same I2C bus:
+//   upper_back: AD0 → GND  → 0x68
+//   lower_back: AD0 → 3.3V → 0x69
+const int NUM_IMUS = 2;
+const int IMU_ADDRS[NUM_IMUS] = {0x68, 0x69};
+const char* IMU_LABELS[NUM_IMUS] = {"upper_back", "lower_back"};
+bool imuAlive[NUM_IMUS] = {false, false};
 
 unsigned long lastSampleTime = 0;
 unsigned long vibrationEndTime = 0;
 bool vibrating = false;
 
-// --- MPU6050 direct I2C helpers ---
+// --- MPU6050 helpers ---
 
-void mpuWrite(byte reg, byte value) {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(reg);
-  Wire.write(value);
+bool mpuInit(int addr) {
+  // Check if device responds
+  Wire.beginTransmission(addr);
+  if (Wire.endTransmission() != 0) return false;
+
+  // Wake up
+  Wire.beginTransmission(addr);
+  Wire.write(0x6B);
+  Wire.write(0);
   Wire.endTransmission();
-}
-
-bool mpuInit() {
-  // Wake up MPU6050 (clear sleep bit)
-  mpuWrite(0x6B, 0x00);
   delay(100);
 
-  // Set accelerometer range to ±4g (register 0x1C, value 0x08)
-  mpuWrite(0x1C, 0x08);
-  // Set gyro range to ±500°/s (register 0x1B, value 0x08)
-  mpuWrite(0x1B, 0x08);
-  // Set DLPF bandwidth ~21Hz (register 0x1A, value 0x04)
-  mpuWrite(0x1A, 0x04);
+  // ±4g accel range
+  Wire.beginTransmission(addr);
+  Wire.write(0x1C);
+  Wire.write(0x08);
+  Wire.endTransmission();
 
-  // Read WHO_AM_I just for debug, don't fail on unexpected value
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x75);
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 1);
-  byte whoami = Wire.available() ? Wire.read() : 0xFF;
-  Serial.print("{\"type\":\"debug\",\"who_am_i\":\"0x");
-  Serial.print(whoami, HEX);
-  Serial.println("\"}");
+  // ±500°/s gyro range
+  Wire.beginTransmission(addr);
+  Wire.write(0x1B);
+  Wire.write(0x08);
+  Wire.endTransmission();
 
-  return true;  // always continue regardless of WHO_AM_I
+  // 21Hz low-pass filter
+  Wire.beginTransmission(addr);
+  Wire.write(0x1A);
+  Wire.write(0x04);
+  Wire.endTransmission();
+
+  return true;
 }
 
-void mpuRead(float &ax, float &ay, float &az, float &gx, float &gy, float &gz, float &temp) {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B);  // starting register: ACCEL_XOUT_H
+bool mpuRead(int addr, float &ax, float &ay, float &az,
+             float &gx, float &gy, float &gz, float &temp) {
+  Wire.beginTransmission(addr);
+  Wire.write(0x3B);
   Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 14);
+  int n = Wire.requestFrom(addr, 14);
+  if (n < 14) return false;
 
   int16_t raw_ax = (Wire.read() << 8) | Wire.read();
   int16_t raw_ay = (Wire.read() << 8) | Wire.read();
@@ -57,17 +68,14 @@ void mpuRead(float &ax, float &ay, float &az, float &gx, float &gy, float &gz, f
   int16_t raw_gy = (Wire.read() << 8) | Wire.read();
   int16_t raw_gz = (Wire.read() << 8) | Wire.read();
 
-  // ±4g range: sensitivity = 8192 LSB/g
   ax = raw_ax / 8192.0 * 9.81;
   ay = raw_ay / 8192.0 * 9.81;
   az = raw_az / 8192.0 * 9.81;
-
-  // ±500°/s range: sensitivity = 65.5 LSB/(°/s), convert to rad/s
-  gx = raw_gx / 65.5 * (3.14159 / 180.0);
-  gy = raw_gy / 65.5 * (3.14159 / 180.0);
-  gz = raw_gz / 65.5 * (3.14159 / 180.0);
-
+  gx = raw_gx / 65.5 * 0.01745;
+  gy = raw_gy / 65.5 * 0.01745;
+  gz = raw_gz / 65.5 * 0.01745;
   temp = raw_t / 340.0 + 36.53;
+  return true;
 }
 
 // ----------------------------------
@@ -82,9 +90,15 @@ void setup() {
   Wire.begin();
   delay(250);
 
-  if (!mpuInit()) {
-    Serial.println("{\"type\":\"error\",\"message\":\"MPU6050 not found\"}");
-    while (1) { delay(1000); }
+  for (int i = 0; i < NUM_IMUS; i++) {
+    imuAlive[i] = mpuInit(IMU_ADDRS[i]);
+    StaticJsonDocument<128> doc;
+    doc["type"]   = "debug";
+    doc["sensor"] = IMU_LABELS[i];
+    doc["addr"]   = String("0x") + String(IMU_ADDRS[i], HEX);
+    doc["status"] = imuAlive[i] ? "ok" : "not found";
+    serializeJson(doc, Serial);
+    Serial.println();
   }
 
   Serial.println("{\"type\":\"status\",\"message\":\"esp32_ready\"}");
@@ -102,27 +116,34 @@ void loop() {
 
   if (now - lastSampleTime >= SAMPLE_INTERVAL_MS) {
     lastSampleTime = now;
-    sendIMUFrame();
+    sendAllIMUFrames();
   }
 }
 
-void sendIMUFrame() {
-  float ax, ay, az, gx, gy, gz, temp;
-  mpuRead(ax, ay, az, gx, gy, gz, temp);
+void sendAllIMUFrames() {
+  unsigned long ts = millis();
 
-  StaticJsonDocument<256> doc;
-  doc["type"] = "imu";
-  doc["ts"]   = millis();
-  doc["ax"]   = ax;
-  doc["ay"]   = ay;
-  doc["az"]   = az;
-  doc["gx"]   = gx;
-  doc["gy"]   = gy;
-  doc["gz"]   = gz;
-  doc["temp"] = temp;
+  for (int i = 0; i < NUM_IMUS; i++) {
+    if (!imuAlive[i]) continue;
 
-  serializeJson(doc, Serial);
-  Serial.println();
+    float ax, ay, az, gx, gy, gz, temp;
+    if (!mpuRead(IMU_ADDRS[i], ax, ay, az, gx, gy, gz, temp)) continue;
+
+    StaticJsonDocument<320> doc;
+    doc["type"]   = "imu";
+    doc["sensor"] = IMU_LABELS[i];
+    doc["ts"]     = ts;
+    doc["ax"]     = ax;
+    doc["ay"]     = ay;
+    doc["az"]     = az;
+    doc["gx"]     = gx;
+    doc["gy"]     = gy;
+    doc["gz"]     = gz;
+    doc["temp"]   = temp;
+
+    serializeJson(doc, Serial);
+    Serial.println();
+  }
 }
 
 void handleSerialCommands() {

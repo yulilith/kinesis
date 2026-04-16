@@ -308,7 +308,27 @@ class BodyAgent:
         frames = self._replay_bridge.get_recent_frames(window_ms=1000)
         return self._frames_to_readings(frames)
 
-    async def _check_data_source(self, session: ClientSession) -> str:
+    async def _check_demo_reset(self, mcp: MultiMCPSession,
+                                mock_posture: MockPostureSensor,
+                                mock_tension: MockTensionSensor) -> None:
+        """Poll state://system/demo_reset — restart timelines when dashboard button is clicked."""
+        data = await mcp.read_resource("state://system/demo_reset")
+        if not data:
+            return
+        version = data.get("version", 0)
+        if version > self._demo_reset_version:
+            self._demo_reset_version = version
+            if mock_posture._scripted:
+                mock_posture._scripted.reset()
+            if mock_tension._scripted:
+                mock_tension._scripted.reset()
+            self._local.bad_posture_since = None
+            self._local.high_tension_since = None
+            self._local.last_llm_time = 0.0
+            self._local.last_haptic_time = 0.0
+            logger.info("Demo timeline restarted (reset version %d)", version)
+
+    async def _check_data_source(self, mcp: MultiMCPSession) -> str:
         """Read the data_source toggle from the blackboard (set by dashboard)."""
         try:
             result = await session.read_resource("state://kinesess/data_source")
@@ -330,6 +350,7 @@ class BodyAgent:
         # Mock sensors always available as fallback
         mock_posture = MockPostureSensor(scripted=DEMO_POSTURE_TIMELINE if self._demo else None)
         mock_tension = MockTensionSensor()
+        self._demo_reset_version = 0  # track demo restart signals
 
         if self._replay_bridge is not None:
             self._replay_bridge.start_streaming()
@@ -339,6 +360,9 @@ class BodyAgent:
             active_mode = "esp32" if self._esp32 is not None else "mock"
 
         while True:
+            # Check for demo restart signal from dashboard
+            await self._check_demo_reset(mcp, mock_posture, mock_tension)
+
             # Check dashboard toggle
             requested_mode = await self._check_data_source(session)
             requested_profile = await self._check_replay_profile(session)

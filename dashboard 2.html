@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kinesis — Agent Interactions</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'IBM Plex Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; background: #0a0a0a; color: #d4d4d4; height: 100vh; display: flex; flex-direction: column; font-size: 15px; }
+  .main-layout { display: flex; flex: 1; overflow: hidden; }
+
+  /* Header */
+  header { padding: 14px 24px; border-bottom: 1px solid #222; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+  header h1 { font-size: 1.1em; font-weight: 700; color: #fff; letter-spacing: 3px; text-transform: uppercase; }
+  .agents { display: flex; gap: 8px; }
+  .agent-chip { padding: 5px 14px; font-size: 0.85em; font-weight: 600; border: 1px solid #333; color: #555; transition: all 0.3s; text-transform: uppercase; letter-spacing: 1px; }
+  .agent-chip.active { color: #fff; }
+  .agent-chip.active[data-agent=kinesess] { border-color: #e06c75; color: #e06c75; background: none; }
+  .agent-chip.active[data-agent=glasses] { border-color: #56b6c2; color: #56b6c2; background: none; }
+  .agent-chip.active[data-agent=brain] { border-color: #c678dd; color: #c678dd; background: none; }
+
+  /* Context bar */
+  .context-bar { padding: 10px 24px; border-bottom: 1px solid #222; display: flex; gap: 20px; font-size: 0.9em; color: #666; flex-shrink: 0; background: #0e0e0e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .ctx-item { display: flex; align-items: center; gap: 6px; }
+  .ctx-val { color: #abb2bf; font-weight: 700; }
+  .ctx-val.bad { color: #e06c75; }
+  .ctx-val.good { color: #98c379; }
+  .ctx-dot { width: 6px; height: 6px; border-radius: 0; }
+  .ctx-dot.social-yes { background: #c678dd; }
+  .ctx-dot.social-no { background: #333; }
+
+  /* Sidebar */
+  .sidebar { width: 220px; flex-shrink: 0; background: #0e0e0e; border-right: 1px solid #222; padding: 20px 16px; overflow-y: auto; }
+  .sidebar h3 { font-size: 0.75em; text-transform: uppercase; letter-spacing: 2px; color: #555; margin-bottom: 16px; }
+  .sidebar-section { margin-bottom: 24px; }
+  .filter-item { display: flex; align-items: center; gap: 10px; padding: 5px 0; cursor: pointer; user-select: none; }
+  .filter-item input[type="checkbox"] { appearance: none; width: 14px; height: 14px; border-radius: 0; border: 1px solid #444; background: transparent; cursor: pointer; flex-shrink: 0; position: relative; }
+  .filter-item input[type="checkbox"]:checked { border-color: #d4d4d4; background: #d4d4d4; }
+  .filter-item input[type="checkbox"]:checked::after { content: '\2713'; position: absolute; top: -1px; left: 1px; font-size: 11px; color: #0a0a0a; font-weight: 700; }
+  .filter-item label { font-size: 0.85em; color: #999; cursor: pointer; text-transform: uppercase; letter-spacing: 0.5px; }
+  .filter-item:hover label { color: #d4d4d4; }
+  .filter-item[data-agent="kinesess"] input:checked { border-color: #e06c75; background: #e06c75; }
+  .filter-item[data-agent="glasses"] input:checked { border-color: #56b6c2; background: #56b6c2; }
+  .filter-item[data-agent="brain"] input:checked { border-color: #c678dd; background: #c678dd; }
+  .filter-item[data-agent="system"] input:checked { border-color: #5c6370; background: #5c6370; }
+
+  /* Toggle switch */
+  .toggle-section { margin-bottom: 24px; }
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; }
+  .toggle-label { font-size: 0.85em; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }
+  .toggle-label .mode-val { color: #56b6c2; font-weight: 700; }
+  .toggle-switch { position: relative; width: 36px; height: 18px; cursor: pointer; flex-shrink: 0; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-track { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #333; transition: background 0.2s; }
+  .toggle-track::after { content: ''; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; background: #888; transition: transform 0.2s, background 0.2s; }
+  .toggle-switch input:checked + .toggle-track { background: #1a3a2a; }
+  .toggle-switch input:checked + .toggle-track::after { transform: translateX(18px); background: #98c379; }
+
+  /* Main feed */
+  .feed { flex: 1; overflow-y: auto; padding: 16px 24px; }
+  .feed::-webkit-scrollbar { width: 4px; }
+  .feed::-webkit-scrollbar-thumb { background: #333; border-radius: 0; }
+  .feed::-webkit-scrollbar-track { background: #0a0a0a; }
+
+  /* Event cards */
+  .event { margin-bottom: 2px; padding: 10px 14px; border-radius: 0; border-left: 2px solid #333; background: transparent; }
+  .event:hover { background: #111; }
+  .event-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .event-agent { font-weight: 700; font-size: 0.9em; text-transform: uppercase; letter-spacing: 0.5px; }
+  .event-agent.kinesess { color: #e06c75; }
+  .event-agent.glasses { color: #56b6c2; }
+  .event-agent.brain { color: #c678dd; }
+  .event-agent.system { color: #5c6370; }
+  .event-arrow { color: #555; font-size: 0.8em; }
+  .event-time { color: #444; font-size: 0.75em; margin-left: auto; font-variant-numeric: tabular-nums; }
+  .event-type { font-size: 0.7em; padding: 2px 8px; border-radius: 0; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; border: 1px solid; }
+  .event-type.question { background: none; color: #56b6c2; border-color: #56b6c2; }
+  .event-type.reply { background: none; color: #98c379; border-color: #98c379; }
+  .event-type.haptic { background: none; color: #d19a66; border-color: #d19a66; }
+  .event-type.speech { background: none; color: #98c379; border-color: #98c379; }
+  .event-type.muted { background: none; color: #5c6370; border-color: #3e4451; }
+  .event-type.decision { background: none; color: #e5c07b; border-color: #e5c07b; }
+  .event-type.scene { background: none; color: #61afef; border-color: #61afef; }
+  .event-type.trigger { background: none; color: #d19a66; border-color: #d19a66; }
+  .event-body { font-size: 0.9em; line-height: 1.6; color: #bbb; }
+  .event-body .detail { color: #555; font-size: 0.85em; margin-top: 2px; }
+  .event-body strong { color: #fff; font-weight: 700; }
+
+  /* Borders by agent */
+  .event.kinesess { border-left-color: #e06c75; }
+  .event.glasses { border-left-color: #56b6c2; }
+  .event.brain { border-left-color: #c678dd; }
+  .event.system { border-left-color: #3e4451; }
+
+  /* Discussion special styling */
+  .event.discussion { background: transparent; }
+  .event.discussion.question { border-left-color: #56b6c2; }
+  .event.discussion.reply { border-left-color: #98c379; }
+
+  /* Sensor log */
+  .sensor-log-section { margin-bottom: 24px; }
+  .sensor-log { background: #111; border: 1px solid #222; height: 170px; overflow-y: auto; padding: 8px 10px; font-size: 0.75em; line-height: 1.6; color: #666; }
+  .sensor-log::-webkit-scrollbar { width: 3px; }
+  .sensor-log::-webkit-scrollbar-thumb { background: #333; }
+  .sensor-log::-webkit-scrollbar-track { background: #111; }
+  .sensor-log .log-line { border-bottom: 1px solid #1a1a1a; padding: 2px 0; }
+  .sensor-log .log-time { color: #444; }
+  .sensor-log .log-label { color: #56b6c2; font-weight: 700; }
+  .sensor-log .log-conf { color: #e5c07b; }
+  .sensor-log .log-scores { color: #555; }
+  .sensor-log .log-motion { color: #98c379; }
+  .sensor-log .log-empty { color: #333; text-transform: uppercase; letter-spacing: 1px; padding: 8px 0; text-align: center; }
+
+  /* Empty state */
+  .empty { text-align: center; color: #333; padding: 60px 0; font-size: 0.85em; text-transform: uppercase; letter-spacing: 2px; }
+  .empty .dot-anim { display: inline-block; animation: pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 0.2; } 50% { opacity: 0.8; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Kinesis</h1>
+  <div class="agents">
+    <div class="agent-chip" data-agent="kinesess" id="chip-kinesess">Body</div>
+    <div class="agent-chip" data-agent="glasses" id="chip-glasses">Context</div>
+    <div class="agent-chip" data-agent="brain" id="chip-brain">Planner</div>
+  </div>
+</header>
+
+<div class="context-bar" id="context-bar">
+  <div class="ctx-item">Posture <span class="ctx-val" id="ctx-posture">--</span></div>
+  <div class="ctx-item">Deviation <span class="ctx-val" id="ctx-deviation">--</span></div>
+  <div class="ctx-item">Scene <span class="ctx-val" id="ctx-scene">--</span></div>
+  <div class="ctx-item">Social <span class="ctx-dot social-no" id="ctx-social-dot"></span><span class="ctx-val" id="ctx-social">--</span></div>
+  <div class="ctx-item">Tension <span class="ctx-val" id="ctx-tension">--</span></div>
+  <div class="ctx-item">Mode <span class="ctx-val" id="ctx-mode">normal</span></div>
+  <div class="ctx-item">Budget <span class="ctx-val" id="ctx-budget">20</span></div>
+</div>
+
+<div class="main-layout">
+<aside class="sidebar">
+  <div class="sidebar-section toggle-section">
+    <h3>Context Source</h3>
+    <div class="toggle-row">
+      <span class="toggle-label">Mock</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="toggle-camera">
+        <span class="toggle-track"></span>
+      </label>
+      <span class="toggle-label">Camera</span>
+    </div>
+  </div>
+
+  <div class="sidebar-section toggle-section">
+    <h3>Body Source</h3>
+    <div class="toggle-row">
+      <span class="toggle-label">Mock</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="toggle-esp32">
+        <span class="toggle-track"></span>
+      </label>
+      <span class="toggle-label">ESP32</span>
+    </div>
+  </div>
+
+  <div class="sidebar-section">
+    <h3>Show Agents</h3>
+    <div class="filter-item" data-agent="kinesess">
+      <input type="checkbox" id="filter-kinesess" checked>
+      <label for="filter-kinesess">Body Agent</label>
+    </div>
+    <div class="filter-item" data-agent="glasses">
+      <input type="checkbox" id="filter-glasses" checked>
+      <label for="filter-glasses">Context Agent</label>
+    </div>
+    <div class="filter-item" data-agent="brain">
+      <input type="checkbox" id="filter-brain" checked>
+      <label for="filter-brain">Planner</label>
+    </div>
+    <div class="filter-item" data-agent="system">
+      <input type="checkbox" id="filter-system" checked>
+      <label for="filter-system">System</label>
+    </div>
+  </div>
+
+  <div class="sidebar-section sensor-log-section">
+    <h3>Camera Log</h3>
+    <div class="sensor-log" id="sensor-log">
+      <div class="log-empty">No sensor data</div>
+    </div>
+  </div>
+
+  <div class="sidebar-section sensor-log-section">
+    <h3>Body Log</h3>
+    <div class="sensor-log" id="body-sensor-log">
+      <div class="log-empty">No sensor data</div>
+    </div>
+  </div>
+</aside>
+
+<div class="feed" id="feed">
+  <div class="empty">Waiting for agents to connect<span class="dot-anim">...</span></div>
+</div>
+</div>
+
+<script>
+const feed = document.getElementById('feed');
+let firstEvent = true;
+const agentLastSeen = {};
+
+// Agent filter state
+const agentFilters = { kinesess: true, glasses: true, brain: true, system: true };
+
+document.querySelectorAll('.filter-item input[type="checkbox"]').forEach(cb => {
+  cb.addEventListener('change', () => {
+    const agent = cb.closest('.filter-item').dataset.agent;
+    agentFilters[agent] = cb.checked;
+    // Show/hide existing events
+    feed.querySelectorAll('.event').forEach(el => {
+      const evAgent = getEventAgent(el);
+      if (evAgent) el.style.display = agentFilters[evAgent] ? '' : 'none';
+    });
+  });
+});
+
+function getEventAgent(el) {
+  for (const name of ['kinesess', 'glasses', 'brain', 'system']) {
+    if (el.classList.contains(name)) return name;
+  }
+  return null;
+}
+
+// Dedup: suppress identical agent+type events within 15s (discussions exempt)
+const _lastEventTime = {};
+const _lastEventMsg = {};
+function addEvent(opts) {
+  const dedupKey = `${opts.agent || 'system'}:${opts.type || ''}`;
+  const now = Date.now();
+  const isDiscussion = opts.type === 'question' || opts.type === 'reply';
+  // Discussions and decisions always show; others dedup by key+message within 15s
+  if (!isDiscussion && opts.type !== 'decision') {
+    if (_lastEventTime[dedupKey] && (now - _lastEventTime[dedupKey]) < 15000
+        && _lastEventMsg[dedupKey] === opts.message) return;
+  }
+  _lastEventTime[dedupKey] = now;
+  _lastEventMsg[dedupKey] = opts.message;
+
+  if (firstEvent) { feed.innerHTML = ''; firstEvent = false; }
+
+  const el = document.createElement('div');
+  const agentClass = opts.agent || 'system';
+  const extraClass = opts.extraClass || '';
+  el.className = `event ${agentClass} ${extraClass}`.trim();
+
+  let headerHTML = '';
+  if (opts.from && opts.to) {
+    headerHTML = `<span class="event-agent ${opts.from}">${agentName(opts.from)}</span>
+      <span class="event-arrow">&rarr;</span>
+      <span class="event-agent ${opts.to}">${agentName(opts.to)}</span>`;
+  } else if (opts.agent) {
+    headerHTML = `<span class="event-agent ${opts.agent}">${agentName(opts.agent)}</span>`;
+  }
+
+  const typeHTML = opts.type ? `<span class="event-type ${opts.type}">${opts.type}</span>` : '';
+  const timeStr = new Date().toLocaleTimeString();
+  const detailHTML = opts.detail ? `<div class="detail">${opts.detail}</div>` : '';
+
+  el.innerHTML = `
+    <div class="event-header">${headerHTML} ${typeHTML} <span class="event-time">${timeStr}</span></div>
+    <div class="event-body">${opts.message}${detailHTML}</div>
+  `;
+
+  // Respect agent filter
+  if (!agentFilters[agentClass]) el.style.display = 'none';
+
+  feed.appendChild(el);
+  feed.scrollTop = feed.scrollHeight;
+
+  // Keep max 200
+  while (feed.children.length > 200) feed.removeChild(feed.firstChild);
+}
+
+function agentName(id) {
+  if (id === 'kinesess') return 'Body Agent';
+  if (id === 'glasses') return 'Context Agent';
+  if (id === 'brain') return 'Planner';
+  return id;
+}
+
+// --- SSE ---
+function connectSSE() {
+  const es = new EventSource('/api/events');
+  es.addEventListener('state_update', (e) => {
+    const d = JSON.parse(e.data);
+    handleState(d);
+    if (d.device_id) markActive(d.device_id);
+  });
+  es.addEventListener('full_state', (e) => {
+    const d = JSON.parse(e.data);
+    for (const entry of Object.values(d)) handleState(entry);
+  });
+  es.addEventListener('agent_connected', (e) => {
+    const d = JSON.parse(e.data);
+    markActive(d.agent);
+    addEvent({ agent: d.agent, type: 'scene', message: `${agentName(d.agent)} connected to blackboard` });
+  });
+  es.addEventListener('agents_status', (e) => {
+    const agents = JSON.parse(e.data);
+    for (const [name, info] of Object.entries(agents)) {
+      if (info.active) markActive(name);
+    }
+  });
+  es.addEventListener('discussion', (e) => {
+    const d = JSON.parse(e.data);
+    if (d.direction === 'question') {
+      addEvent({
+        from: d.from, to: d.to, agent: d.from, type: 'question',
+        message: d.message,
+        extraClass: 'discussion question',
+      });
+    } else {
+      addEvent({
+        from: d.from, to: d.to, agent: d.from, type: 'reply',
+        message: d.message,
+        extraClass: 'discussion reply',
+      });
+    }
+  });
+  es.onerror = () => {};
+}
+
+// Track what we've already logged to avoid spam
+let lastPosture = '', lastScene = '', lastHaptic = 0, lastSpeech = 0;
+let initialPostureShown = false, initialSceneShown = false;
+
+function handleState(entry) {
+  if (!entry || !entry.device_id) return;
+  const did = entry.device_id;
+  const key = entry.key;
+  const data = entry.data || {};
+
+  if (did === 'kinesess' && key === 'posture') {
+    const cls = data.classification || 'unknown';
+    const dev = (data.deviation_degrees || 0).toFixed(1);
+    // Always update context bar (silent)
+    const el = document.getElementById('ctx-posture');
+    el.textContent = cls.replace(/_/g, ' ');
+    el.className = 'ctx-val ' + (cls === 'good' ? 'good' : cls === 'unknown' ? '' : 'bad');
+    document.getElementById('ctx-deviation').textContent = dev + '\u00B0';
+
+    // Log initial posture and changes
+    if (cls !== lastPosture) {
+      if (lastPosture === '' && !initialPostureShown) {
+        initialPostureShown = true;
+        addEvent({
+          agent: 'kinesess', type: 'trigger',
+          message: `Posture: <strong>${cls.replace(/_/g, ' ')}</strong>`,
+          detail: `deviation: ${dev}\u00B0`,
+        });
+      } else if (lastPosture !== '') {
+        addEvent({
+          agent: 'kinesess', type: 'trigger',
+          message: `Posture changed: <strong>${lastPosture.replace(/_/g, ' ')}</strong> &rarr; <strong>${cls.replace(/_/g, ' ')}</strong>`,
+          detail: `deviation: ${dev}\u00B0`,
+        });
+      }
+      lastPosture = cls;
+    }
+  }
+  else if (did === 'kinesess' && key === 'sensor_log') {
+    appendBodySensorLog(data);
+  }
+  else if (did === 'kinesess' && key === 'data_source') {
+    const mode = data.mode || 'mock';
+    toggleEsp32.checked = mode === 'esp32';
+  }
+  else if (did === 'kinesess' && key === 'tension') {
+    document.getElementById('ctx-tension').textContent = ((data.level||0)*100).toFixed(0) + '%';
+  }
+  else if (did === 'kinesess' && key === 'last_haptic') {
+    if (Date.now() - lastHaptic > 2000) {
+      addEvent({
+        agent: 'kinesess', type: 'haptic',
+        message: `Haptic fired: <strong>${data.pattern}</strong> at intensity ${(data.intensity||0).toFixed(1)}`,
+        detail: data.reason,
+      });
+      lastHaptic = Date.now();
+    }
+  }
+  else if (did === 'glasses' && key === 'context') {
+    const scene = data.scene || 'unknown';
+    // Always update the context bar (silent)
+    document.getElementById('ctx-scene').textContent = scene;
+    const socialDot = document.getElementById('ctx-social-dot');
+    socialDot.className = 'ctx-dot ' + (data.social ? 'social-yes' : 'social-no');
+    document.getElementById('ctx-social').textContent = data.social ? 'yes' : 'no';
+
+    // Log initial scene and changes
+    if (scene !== lastScene) {
+      if (lastScene === '' && !initialSceneShown) {
+        initialSceneShown = true;
+        addEvent({
+          agent: 'glasses', type: 'scene',
+          message: `Scene: <strong>${scene}</strong>`,
+          detail: `social: ${data.social}, noise: ${(data.ambient_noise_db||0).toFixed(0)} dB`,
+        });
+      } else if (lastScene !== '') {
+        addEvent({
+          agent: 'glasses', type: 'scene',
+          message: `Scene changed: <strong>${lastScene}</strong> &rarr; <strong>${scene}</strong>`,
+          detail: `social: ${data.social}, noise: ${(data.ambient_noise_db||0).toFixed(0)} dB`,
+        });
+      }
+      lastScene = scene;
+    }
+  }
+  else if (did === 'glasses' && key === 'last_decision') {
+    addEvent({
+      agent: 'glasses', type: 'decision',
+      message: data.reasoning || '(no reasoning)',
+      detail: `trigger: ${data.trigger || '?'}`,
+    });
+  }
+  else if (did === 'kinesess' && key === 'last_decision') {
+    addEvent({
+      agent: 'kinesess', type: 'decision',
+      message: data.reasoning || '(no reasoning)',
+      detail: `trigger: ${data.trigger || '?'}`,
+    });
+  }
+  else if (did === 'glasses' && key === 'sensor_log') {
+    appendSensorLog(data);
+  }
+  else if (did === 'glasses' && key === 'data_source') {
+    const mode = data.mode || 'mock';
+    toggleCamera.checked = mode === 'camera';
+  }
+  else if (did === 'glasses' && key === 'gaze') {
+    // skip — too noisy
+  }
+  else if (did === 'glasses' && key === 'speech_command') {
+    if (Date.now() - lastSpeech > 2000) {
+      if (data.suppressed) {
+        addEvent({
+          agent: 'glasses', type: 'muted',
+          message: `Speech suppressed: "${data.message}"`,
+          detail: `reason: ${data.suppress_reason || 'context not appropriate'}`,
+        });
+      } else {
+        addEvent({
+          agent: 'glasses', type: 'speech',
+          message: `Speaking: "${data.message}"`,
+        });
+      }
+      lastSpeech = Date.now();
+    }
+  }
+  else if (did === 'brain' && key === 'mode') {
+    const mode = data.mode || 'normal';
+    document.getElementById('ctx-mode').textContent = mode;
+    addEvent({ agent: 'brain', type: 'decision', message: `Intervention mode set to <strong>${mode}</strong>` });
+  }
+  else if (did === 'brain' && key === 'attention_budget') {
+    document.getElementById('ctx-budget').textContent = data.remaining ?? '--';
+  }
+  else if (did === 'brain' && key === 'plan') {
+    if (data.message && data.message !== 'Session starting.') {
+      addEvent({ agent: 'brain', type: 'decision', message: data.message });
+    }
+  }
+}
+
+function markActive(name) {
+  agentLastSeen[name] = Date.now();
+  updateChips();
+}
+
+function updateChips() {
+  const now = Date.now();
+  for (const name of ['kinesess', 'glasses', 'brain']) {
+    const el = document.getElementById('chip-' + name);
+    if (!el) continue;
+    const last = agentLastSeen[name];
+    el.classList.toggle('active', last && (now - last) < 5000);
+  }
+}
+setInterval(updateChips, 2000);
+
+// --- Sensor log ---
+const sensorLog = document.getElementById('sensor-log');
+let sensorLogFirstEntry = true;
+
+function appendSensorLog(data) {
+  if (sensorLogFirstEntry) { sensorLog.innerHTML = ''; sensorLogFirstEntry = false; }
+
+  const line = document.createElement('div');
+  line.className = 'log-line';
+
+  const t = new Date().toLocaleTimeString();
+  const label = data.scene_label || '?';
+  const conf = ((data.confidence || 0) * 100).toFixed(0);
+  const motion = ((data.motion_level || 0) * 100).toFixed(0);
+  const prompt = data.top_prompt || '';
+
+  // Build score bar for each label
+  let scoresHTML = '';
+  if (data.scores_by_label) {
+    const sorted = Object.entries(data.scores_by_label).sort((a, b) => b[1] - a[1]);
+    scoresHTML = sorted.map(([l, s]) => {
+      const pct = (s * 100).toFixed(0);
+      const highlight = l === label ? 'color:#56b6c2' : '';
+      return `<span style="${highlight}">${l}:${pct}%</span>`;
+    }).join(' ');
+  }
+
+  line.innerHTML =
+    `<span class="log-time">${t}</span> ` +
+    `<span class="log-label">${label}</span> ` +
+    `<span class="log-conf">${conf}%</span> ` +
+    `<span class="log-motion">m:${motion}%</span>` +
+    (scoresHTML ? `<br><span class="log-scores">${scoresHTML}</span>` : '') +
+    (prompt ? `<br><span class="log-scores">${prompt}</span>` : '');
+
+  sensorLog.appendChild(line);
+  sensorLog.scrollTop = sensorLog.scrollHeight;
+
+  // Keep max 50 entries
+  while (sensorLog.children.length > 50) sensorLog.removeChild(sensorLog.firstChild);
+}
+
+connectSSE();
+
+// Poll sensor logs separately (not SSE — too noisy)
+let _lastSensorVersion = {};
+setInterval(async () => {
+  try {
+    const r = await fetch('/api/sensor_log');
+    const data = await r.json();
+    for (const [key, entry] of Object.entries(data)) {
+      if (entry.version !== _lastSensorVersion[key]) {
+        _lastSensorVersion[key] = entry.version;
+        if (key === 'glasses/sensor_log') appendSensorLog(entry.data);
+        if (key === 'kinesess/sensor_log') appendBodySensorLog(entry.data);
+      }
+    }
+  } catch {}
+}, 3000);
+
+// --- Data source toggles ---
+const toggleCamera = document.getElementById('toggle-camera');
+const toggleEsp32 = document.getElementById('toggle-esp32');
+
+toggleCamera.addEventListener('change', () => {
+  const mode = toggleCamera.checked ? 'camera' : 'mock';
+  fetch('/api/tool/update_state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_id: 'glasses', key: 'data_source', data: { mode }, confidence: 1.0 }),
+  }).then(() => {
+    addEvent({ agent: 'system', type: 'scene', message: `Context source switched to <strong>${mode}</strong>` });
+  });
+});
+
+toggleEsp32.addEventListener('change', () => {
+  const mode = toggleEsp32.checked ? 'esp32' : 'mock';
+  fetch('/api/tool/update_state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_id: 'kinesess', key: 'data_source', data: { mode }, confidence: 1.0 }),
+  }).then(() => {
+    addEvent({ agent: 'system', type: 'scene', message: `Body source switched to <strong>${mode}</strong>` });
+  });
+});
+
+// --- Body sensor log ---
+const bodySensorLog = document.getElementById('body-sensor-log');
+let bodyLogFirstEntry = true;
+
+function appendBodySensorLog(data) {
+  if (bodyLogFirstEntry) { bodySensorLog.innerHTML = ''; bodyLogFirstEntry = false; }
+
+  const line = document.createElement('div');
+  line.className = 'log-line';
+
+  const t = new Date().toLocaleTimeString();
+  const dev = (data.deviation_deg || 0).toFixed(1);
+  const tilt = (data.mean_tilt_deg || 0).toFixed(1);
+  const still = ((data.stillness_score || 0) * 100).toFixed(0);
+  const motion = (data.motion_level || 0).toFixed(3);
+  const frames = data.num_frames || 0;
+  const devAbs = Math.abs(data.deviation_deg || 0);
+  const devColor = devAbs < 8 ? '#98c379' : devAbs < 15 ? '#e5c07b' : '#e06c75';
+
+  line.innerHTML =
+    `<span class="log-time">${t}</span> ` +
+    `<span style="color:${devColor};font-weight:700">dev:${dev}\u00B0</span> ` +
+    `<span class="log-scores">tilt:${tilt}\u00B0</span> ` +
+    `<span class="log-scores">still:${still}%</span>` +
+    `<br><span class="log-scores">motion:${motion} frames:${frames}</span>`;
+
+  bodySensorLog.appendChild(line);
+  bodySensorLog.scrollTop = bodySensorLog.scrollHeight;
+  while (bodySensorLog.children.length > 50) bodySensorLog.removeChild(bodySensorLog.firstChild);
+}
+</script>
+</body>
+</html>

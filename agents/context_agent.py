@@ -295,10 +295,26 @@ class ContextAgent:
         AVFoundation's requirement that VideoCapture is opened on the main thread."""
         self._init_camera()
 
-    async def _sensor_loop(self, session: ClientSession) -> None:
+    async def _check_demo_reset(self, mcp: MultiMCPSession,
+                                mock_scene: MockSceneSensor) -> None:
+        """Poll state://system/demo_reset — restart timeline when dashboard button is clicked."""
+        data = await mcp.read_resource("state://system/demo_reset")
+        if not data:
+            return
+        version = data.get("version", 0)
+        if version > self._demo_reset_version:
+            self._demo_reset_version = version
+            if mock_scene._scripted:
+                mock_scene._scripted.reset()
+            self._local.last_scene = None
+            self._local.last_llm_time = 0.0
+            logger.info("Demo timeline restarted (reset version %d)", version)
+
+    async def _sensor_loop(self, mcp: MultiMCPSession) -> None:
         # Init mock sensors (always available as fallback)
         mock_scene = MockSceneSensor(scripted=DEMO_TIMELINE if self._demo else None)
         mock_gaze = MockGazeSensor(scene_sensor=mock_scene)
+        self._demo_reset_version = 0
 
         if self._replay_source is not None:
             self._replay_source.reset()
@@ -308,6 +324,9 @@ class ContextAgent:
             active_mode = "camera" if self._camera is not None else "mock"
 
         while True:
+            # Check for demo restart signal from dashboard
+            await self._check_demo_reset(mcp, mock_scene)
+
             # Check dashboard toggle
             requested_mode = await self._check_data_source(session)
             requested_profile = await self._check_replay_profile(session)

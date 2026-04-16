@@ -79,6 +79,8 @@
   .action-btn.scenario.active { background: #132029; border-color: #61afef; color: #fff; }
   .action-btn.scenario small { display: block; color: #666; font-size: 0.9em; margin-top: 4px; text-transform: none; letter-spacing: 0; }
   .action-btn.mock { border-color: #444; color: #999; }
+  .action-btn.restart { border-color: #98c379; color: #98c379; font-weight: 700; }
+  .action-btn.restart:hover { background: #1a2e1a; border-color: #98c379; color: #fff; }
   .replay-status { margin-top: 10px; font-size: 0.75em; color: #777; text-transform: uppercase; letter-spacing: 1px; }
   .replay-status strong { color: #fff; }
 
@@ -187,6 +189,13 @@
         <span class="toggle-track"></span>
       </label>
       <span class="toggle-label">ESP32</span>
+    </div>
+  </div>
+
+  <div class="sidebar-section">
+    <h3>Demo</h3>
+    <div class="source-actions">
+      <button class="action-btn restart" id="btn-restart-demo">Restart Demo</button>
     </div>
   </div>
 
@@ -575,6 +584,57 @@ function appendSensorLog(data) {
 }
 
 connectSSE();
+
+// --- Restart Demo button ---
+document.getElementById('btn-restart-demo').addEventListener('click', async () => {
+  try {
+    const r = await fetch('/api/demo_restart', { method: 'POST' });
+    const data = await r.json();
+    if (data.ok) {
+      // Clear the feed
+      feed.innerHTML = '';
+      firstEvent = true;
+      lastPosture = ''; lastScene = '';
+      initialPostureShown = false; initialSceneShown = false;
+      addEvent({ agent: 'system', type: 'scene', message: 'Demo restarted — timelines reset to beginning' });
+    }
+  } catch {
+    addEvent({ agent: 'system', type: 'muted', message: 'Failed to restart demo' });
+  }
+});
+
+// --- Server health polling (proxied through shared state to avoid CORS) ---
+async function checkServerHealth() {
+  try {
+    const r = await fetch('/api/server_health');
+    const results = await r.json();
+
+    for (const [port, up] of Object.entries(results)) {
+      const dot = document.getElementById('srv-' + port);
+      if (dot) dot.className = 'server-dot ' + (up ? 'up' : 'down');
+    }
+
+    const stateUp = results['8080'];
+    const allHwUp = results['8081'] && results['8082'] && results['8083'];
+    const anyHwUp = results['8081'] || results['8082'] || results['8083'];
+    const label = document.getElementById('arch-label');
+
+    if (stateUp && allHwUp) {
+      label.innerHTML = 'Architecture: <strong>Multi-Server</strong>';
+    } else if (stateUp && !anyHwUp) {
+      label.innerHTML = 'Architecture: <strong>Single Blackboard</strong>';
+    } else if (stateUp) {
+      label.innerHTML = 'Architecture: <strong>Partial</strong>';
+    } else {
+      label.innerHTML = 'Architecture: <strong>offline</strong>';
+    }
+  } catch {
+    document.getElementById('arch-label').innerHTML = 'Architecture: <strong>offline</strong>';
+  }
+}
+
+checkServerHealth();
+setInterval(checkServerHealth, 4000);
 
 // Poll sensor logs separately (not SSE — too noisy)
 let _lastSensorVersion = {};
