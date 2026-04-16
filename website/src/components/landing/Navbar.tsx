@@ -31,7 +31,7 @@ export default function Navbar() {
         <a
           href="#"
           className={`text-sm font-light tracking-wide transition-colors ${
-            scrolled ? "text-foreground" : "text-white"
+            scrolled ? "text-foreground" : "text-black"
           }`}
         >
           Kinesis
@@ -44,7 +44,7 @@ export default function Navbar() {
               className={`text-xs font-light tracking-wider transition-colors ${
                 scrolled
                   ? "text-muted hover:text-foreground"
-                  : "text-white/60 hover:text-white"
+                  : "text-black/60 hover:text-black"
               }`}
             >
               {l.label}
