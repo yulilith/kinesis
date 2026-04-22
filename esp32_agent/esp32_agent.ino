@@ -15,8 +15,11 @@ const int ai_server_port = 8080;
 // 硬件引脚定义
 #define LED_PIN 2
 #define VIBRATION_PIN 4
-#define EMS_PIN 5
+#define EMG_PIN 34        // ADC1_CH6 — 连接 EMG 板 SIG 引脚（只读，不能用 analogWrite）
+#define EMS_PIN 5         // PWM 输出 — 连接 EMS board 控制引脚
 #define BUTTON_PIN 0
+
+#define EMG_THRESHOLD_MV 50.0   // 超过此值视为肌肉主动收缩
 
 // 传感器对象
 MPU6050 imu;
@@ -37,6 +40,7 @@ void setup() {
     // 初始化引脚
     pinMode(LED_PIN, OUTPUT);
     pinMode(VIBRATION_PIN, OUTPUT);
+    pinMode(EMG_PIN, INPUT);
     pinMode(EMS_PIN, OUTPUT);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     
@@ -49,15 +53,20 @@ void setup() {
         Serial.println("❌ IMU连接失败");
     }
     
-    // 连接WiFi
+    // 连接WiFi（非阻塞，连不上也继续运行）
     WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(1000);
+    int wifi_attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && wifi_attempts < 10) {
+        delay(500);
+        wifi_attempts++;
         Serial.println("正在连接WiFi...");
-        digitalWrite(LED_PIN, !digitalRead(LED_PIN)); // LED闪烁表示连接中
     }
-    digitalWrite(LED_PIN, HIGH); // 连接成功，LED常亮
-    Serial.println("✅ WiFi连接成功: " + WiFi.localIP().toString());
+    if (WiFi.status() == WL_CONNECTED) {
+        digitalWrite(LED_PIN, HIGH);
+        Serial.println("✅ WiFi连接成功: " + WiFi.localIP().toString());
+    } else {
+        Serial.println("⚠️ WiFi未连接，仅本地运行");
+    }
     
     // 连接AI服务器
     webSocket.begin(ai_server_ip, ai_server_port, "/");
@@ -84,6 +93,7 @@ void loop() {
         delay(500); // 防抖
     }
     
+    Serial.println("EMG: " + String(readEMG()) + " mV");
     delay(100); // 10Hz采样率
 }
 
@@ -107,8 +117,15 @@ void readPostureData(PostureData* data) {
     data->timestamp = millis();
 }
 
+float readEMG() {
+    // 读取 12-bit ADC (0–4095) → 转换为近似 mV（3.3V 参考，板载增益约 1000x）
+    int raw = analogRead(EMG_PIN);
+    return (raw / 4095.0) * 3300.0;
+}
+
 void sendPostureDataToAI(PostureData data) {
-    // 创建JSON数据
+    float emg_mv = readEMG();
+
     DynamicJsonDocument doc(1024);
     doc["event"] = "posture_data";
     doc["timestamp"] = data.timestamp;
@@ -121,7 +138,10 @@ void sendPostureDataToAI(PostureData data) {
     doc["euler"]["roll"] = data.roll;
     doc["euler"]["pitch"] = data.pitch;
     doc["euler"]["yaw"] = data.yaw;
-    
+    doc["emg"]["channel"] = "upper_back";
+    doc["emg"]["signal_mv"] = emg_mv;
+    doc["emg"]["is_active"] = emg_mv > EMG_THRESHOLD_MV;
+
     String jsonString;
     serializeJson(doc, jsonString);
     webSocket.sendTXT(jsonString);
@@ -170,11 +190,11 @@ void processAICommand(const char* command) {
         Serial.println("🔔 触发振动反馈");
         
     } else if (action == "ems") {
-        int intensity = doc["intensity"] | 30;  // 默认30%强度
-        int duration = doc["duration"] | 200;   // 默认200ms
+        int intensity = doc["intensity"] | 30;
+        int duration = doc["duration"] | 200;
         triggerEMS(intensity, duration);
         Serial.println("⚡ 触发EMS刺激");
-        
+
     } else if (action == "led") {
         bool state = doc["state"] | false;
         digitalWrite(LED_PIN, state ? HIGH : LOW);
@@ -195,13 +215,10 @@ void triggerVibration(int intensity, int duration) {
 }
 
 void triggerEMS(int intensity, int duration) {
-    // ⚠️ 注意：EMS设备需要特殊电路和安全措施
-    // 这里只是示例，实际使用需要专业医疗级EMS设备
-    int pwm_value = map(intensity, 0, 100, 0, 128); // 限制最大强度
+    int pwm_value = map(intensity, 0, 100, 0, 128);  // 限制最大占空比保证安全
     analogWrite(EMS_PIN, pwm_value);
     delay(duration);
     analogWrite(EMS_PIN, 0);
-    Serial.println("⚠️ 警告：请确保EMS设备安全性");
 }
 
 void alertPattern() {

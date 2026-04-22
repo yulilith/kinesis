@@ -21,6 +21,8 @@ from typing import Generic, Protocol, TypeVar, runtime_checkable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from schemas import (
+    EMGChannel,
+    EMGReading,
     EMSChannel,
     EMSCommand,
     GazeReading,
@@ -71,6 +73,11 @@ class IMUSensor(Protocol):
 class HapticActuator(Protocol):
     async def fire(self, pattern: HapticPattern, intensity: float,
                    zone: VibrationZone | None = None) -> None: ...
+
+
+@runtime_checkable
+class EMGSensor(Protocol):
+    async def read(self) -> EMGReading: ...
 
 
 @runtime_checkable
@@ -325,6 +332,32 @@ class MockHapticActuator:
         )
 
 
+class MockEMGSensor:
+    """Returns simulated EMG readings for the upper back muscle sensor."""
+
+    EMG_THRESHOLD_MV = 50.0  # signal above this = active contraction
+
+    def __init__(self) -> None:
+        self.history: list[EMGReading] = []
+
+    async def read(self) -> EMGReading:
+        import random
+        signal_mv = random.gauss(30.0, 20.0)  # resting baseline ~30mV
+        reading = EMGReading(
+            channel=EMGChannel.UPPER_BACK,
+            signal_mv=max(0.0, signal_mv),
+            is_active=signal_mv > self.EMG_THRESHOLD_MV,
+        )
+        self.history.append(reading)
+        print(
+            f"[EMG]   {time.strftime('%H:%M:%S')} "
+            f"channel={reading.channel.value} "
+            f"{reading.signal_mv:.1f}mV "
+            f"active={reading.is_active}"
+        )
+        return reading
+
+
 class MockEMSActuator:
     """Logs EMS commands to console. Enforces per-channel cooldown and intensity cap."""
 
@@ -336,7 +369,6 @@ class MockEMSActuator:
         self._last_fire: dict[EMSChannel, float] = {}
 
     async def fire(self, cmd: EMSCommand) -> bool:
-        """Returns True if fired, False if blocked by cooldown or safety cap."""
         now = time.time()
         last = self._last_fire.get(cmd.channel, 0.0)
         if now - last < self.COOLDOWN_S:
@@ -362,4 +394,5 @@ class MockEMSActuator:
             f"{safe_cmd.frequency_hz:.0f}Hz "
             f"reason={safe_cmd.reason}"
         )
+        return True
         return True

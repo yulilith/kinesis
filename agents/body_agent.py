@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env", override=True)
 
 import anthropic
 from mcp.client.streamable_http import streamable_http_client
@@ -100,7 +100,8 @@ You are the Kinesess body sensor agent — a posture coaching assistant embedded
 ## Hardware
 - 2 IMU sensors: upper_back (T3-T6) and lower_back (L2-L4)
 - 4 vibration motors: shoulder_l, shoulder_r, lumbar_l, lumbar_r
-- 4 EMS channels: rhomboid_l, rhomboid_r, lumbar_erector_l, lumbar_erector_r
+- 1 EMG sensor: upper_back (detects active rhomboid/trapezius contraction)
+- 3 EMS channels: rhomboid_l, rhomboid_r, lumbar_erector
 
 ## Your Role
 You interpret dual-IMU posture data (classification, per-sensor angles, spinal metrics) and decide when and how to intervene. You are called ONLY when a threshold has been crossed (bad posture > 30s, or high muscle tension).
@@ -120,13 +121,16 @@ Use for first intervention or when posture is mildly bad.
   - hunching/slouching → pattern="bilateral" (both shoulders)
   - lower back issue   → zone="lumbar_l" or "lumbar_r", pattern="lumbar_alert"
 
-### Level 2 — EMS (escalation only)
+### Level 2 — EMG check + EMS (escalation only)
 Use ONLY when: haptic was ignored 2+ times this session AND deviation > 20° AND duration > 90s.
+- First call read_emg(channel="upper_back") to check if user is actively trying to correct:
+  - If EMG is_active=True → user is trying but failing; send display_overlay encouragement instead of EMS.
+  - If EMG is_active=False → user is not engaging; proceed to EMS.
 - send_ems targets the muscle that needs to contract to correct the posture:
   - slouching/hunching  → rhomboid_l + rhomboid_r (retract scapulae)
   - lateral lean left   → rhomboid_r (pull right side back)
   - lateral lean right  → rhomboid_l (pull left side back)
-  - lower back issue    → lumbar_erector_l + lumbar_erector_r
+  - lower back issue    → lumbar_erector
 - EMS costs 3x attention budget. Use sparingly.
 - NEVER fire EMS if: social=True, scene=walking or meeting, budget < 3.
 
@@ -139,6 +143,7 @@ Use ONLY when: haptic was ignored 2+ times this session AND deviation > 20° AND
 ## Available Tools
 - ask_agent(from_agent, to_agent, question, context): ALWAYS call first.
 - send_haptic(pattern, reason, intensity, zone): Vibration feedback.
+- read_emg(channel): Read current EMG signal (is_active, signal_mv) from muscle sensor.
 - send_ems(channel, intensity_ma, duration_ms, frequency_hz, reason): EMS.
 - update_state(device_id, key, data, confidence): Write to blackboard.
 - display_overlay(message, duration_ms, position): Show text on glasses.
@@ -308,17 +313,14 @@ class BodyAgent:
         frames = self._replay_bridge.get_recent_frames(window_ms=1000)
         return self._frames_to_readings(frames)
 
-    async def _check_demo_reset(self, session: ClientSession,
+    async def _check_demo_reset(self, mcp: MultiMCPSession,
                                 mock_posture: MockPostureSensor,
                                 mock_tension: MockTensionSensor) -> None:
         """Poll state://system/demo_reset — restart timelines when dashboard button is clicked."""
-        try:
-            result = await session.read_resource("state://system/demo_reset")
-            content = result.contents[0]
-            data = json.loads(content.text if hasattr(content, "text") else str(content))
-        except Exception:
+        data = await mcp.read_resource("state://system/demo_reset")
+        if not data:
             return
-        version = data.get("data", {}).get("version", 0)
+        version = data.get("version", 0)
         if version > self._demo_reset_version:
             self._demo_reset_version = version
             if mock_posture._scripted:
@@ -364,7 +366,7 @@ class BodyAgent:
 
         while True:
             # Check for demo restart signal from dashboard
-            await self._check_demo_reset(session, mock_posture, mock_tension)
+            await self._check_demo_reset(mcp, mock_posture, mock_tension)
 
             # Check dashboard toggle
             requested_mode = await self._check_data_source(session)

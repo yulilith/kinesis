@@ -33,13 +33,12 @@ from starlette.responses import JSONResponse, HTMLResponse, Response
 
 import sys
 from pathlib import Path
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from schemas import (
     PlannerStrategy,
+    EMGChannel,
     EMSChannel,
     HapticPattern,
     InterventionMode,
@@ -76,11 +75,12 @@ _discussion_replies: dict[str, str] = {}  # reply content keyed by discussion_id
 
 _subscriptions: dict[str, set[ServerSession]] = defaultdict(set)
 
-# EMS cooldown tracking — keyed by channel value, stores last fire timestamp
+# EMS cooldown tracking
 _ems_last_fire: dict[str, float] = {}
 EMS_MAX_INTENSITY_MA = 15.0
 EMS_MAX_DURATION_MS  = 3000
 EMS_COOLDOWN_S       = 120.0
+
 
 
 async def _notify_subscribers(uri: str) -> None:
@@ -312,23 +312,19 @@ async def send_ems(channel: str, intensity_ma: float, duration_ms: int,
                    frequency_hz: float, reason: str) -> str:
     """Fire an EMS pulse on a specific muscle channel.
 
-    Safety limits are enforced server-side and cannot be overridden.
-
     Args:
-        channel: "rhomboid_l", "rhomboid_r", "lumbar_erector_l", "lumbar_erector_r"
+        channel: "rhomboid_l", "rhomboid_r", "lumbar_erector"
         intensity_ma: Current in milliamps. Hard cap: 15.0 mA.
         duration_ms: Pulse duration in milliseconds. Hard cap: 3000 ms.
         frequency_hz: Stimulation frequency in Hz. Typical range: 20.0–80.0.
         reason: Why this EMS pulse is being fired
     """
-    EMSChannel(channel)  # validate channel value
+    EMSChannel(channel)
 
-    # Hard safety caps — never bypassed
     intensity_ma = min(intensity_ma, EMS_MAX_INTENSITY_MA)
     duration_ms  = min(duration_ms,  EMS_MAX_DURATION_MS)
     frequency_hz = max(20.0, min(frequency_hz, 80.0))
 
-    # Cooldown check per channel
     last = _ems_last_fire.get(channel, 0.0)
     elapsed = time.time() - last
     if elapsed < EMS_COOLDOWN_S:
@@ -336,7 +332,6 @@ async def send_ems(channel: str, intensity_ma: float, duration_ms: int,
         return json.dumps({"fired": False, "reason": "cooldown",
                            "channel": channel, "wait_s": round(wait, 1)})
 
-    # Budget check — EMS costs 3x a haptic
     budget_entry = _state.get(("brain", "attention_budget"))
     remaining = budget_entry.data["remaining"] if budget_entry else 0
     if remaining < 3:
@@ -359,6 +354,25 @@ async def send_ems(channel: str, intensity_ma: float, duration_ms: int,
     return json.dumps({"fired": True, "channel": channel,
                        "intensity_ma": intensity_ma, "duration_ms": duration_ms,
                        "frequency_hz": frequency_hz, "budget_remaining": new_remaining})
+
+
+@mcp.tool()
+async def update_emg(channel: str, signal_mv: float, is_active: bool) -> str:
+    """Update the latest EMG reading from the ESP32 muscle sensor.
+
+    Called by the ESP32 bridge when a new ADC sample arrives.
+
+    Args:
+        channel: EMG channel — currently only "upper_back"
+        signal_mv: Rectified signal amplitude in millivolts
+        is_active: True when signal exceeds the contraction threshold
+    """
+    EMGChannel(channel)
+    await _update_and_notify(
+        "kinesess", "emg",
+        {"channel": channel, "signal_mv": signal_mv, "is_active": is_active}, 1.0,
+    )
+    return json.dumps({"ok": True, "channel": channel, "is_active": is_active})
 
 
 @mcp.tool()
@@ -649,96 +663,6 @@ async def api_call_tool(request: Request) -> Response:
             return JSONResponse({"error": f"unknown tool: {tool_name}"}, status_code=404)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-
-
-_SCENE_LABELS = [
-    "desk_work", "standing_desk", "meeting", "presenting",
-    "walking", "commuting", "exercise",
-    "resting", "eating", "reading",
-    "social_casual", "social_dining",
-    "outdoor", "unknown",
-]
-
-_CAMERA_CLIENT = None  # reuse across requests
-
-@mcp.custom_route("/camera_frame", methods=["POST"])
-async def camera_frame(request: Request) -> Response:
-    """Receive a JPEG frame from ESP32S3 and run Claude Vision scene recognition."""
-    import anthropic
-    import base64
-
-    global _CAMERA_CLIENT
-    if _CAMERA_CLIENT is None:
-        _CAMERA_CLIENT = anthropic.AsyncAnthropic()
-
-    body = await request.body()
-    if not body:
-        return JSONResponse({"error": "empty body"}, status_code=400)
-
-    image_b64 = base64.standard_b64encode(body).decode("utf-8")
-    labels_str = ", ".join(_SCENE_LABELS)
-
-    try:
-        response = await _CAMERA_CLIENT.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64},
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            f"You are an AI glasses scene recognizer. "
-                            f"Choose ONE scene label from: {labels_str}. "
-                            f"Reply in this exact format:\n"
-                            f"SCENE: <label>\n"
-                            f"PEOPLE: <yes/no>\n"
-                            f"DESC: <one sentence description>"
-                        ),
-                    },
-                ],
-            }],
-        )
-        raw = response.content[0].text
-    except Exception as e:
-        logger.error("Claude Vision error: %s", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-    # Parse structured response
-    scene_label = "unknown"
-    people_present = False
-    description = raw
-    for line in raw.splitlines():
-        if line.startswith("SCENE:"):
-            val = line.split(":", 1)[1].strip().lower()
-            if val in _SCENE_LABELS:
-                scene_label = val
-        elif line.startswith("PEOPLE:"):
-            people_present = "yes" in line.lower()
-        elif line.startswith("DESC:"):
-            description = line.split(":", 1)[1].strip()
-
-    # Write structured scene to blackboard (same format as context_agent)
-    await _update_and_notify(
-        "glasses",
-        "context",
-        {
-            "scene": scene_label,
-            "confidence": 0.85,
-            "social": people_present,
-            "ambient_noise_db": 0.0,
-            "source": "esp32s3_camera",
-            "description": description,
-            "timestamp": time.time(),
-        },
-        confidence=0.85,
-    )
-    logger.info("[ESP32S3 Camera] %s | people=%s | %s", scene_label, people_present, description)
-    return Response(content=description, media_type="text/plain")
 
 
 @mcp.custom_route("/api/demo_restart", methods=["POST"])

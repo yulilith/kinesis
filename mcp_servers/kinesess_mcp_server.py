@@ -30,7 +30,7 @@ from mcp.server.fastmcp import FastMCP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from schemas import EMSChannel, HapticPattern, VibrationZone
+from schemas import EMGChannel, EMSChannel, HapticPattern, VibrationZone
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ _attention_budget: dict[str, Any] = {"remaining": 20, "daily_max": 20}
 _ems_last_fire: dict[str, float] = {}
 _last_haptic: dict[str, Any] = {}
 _last_ems: dict[str, Any] = {}
+_last_emg: dict[str, Any] = {}
 
 EMS_MAX_INTENSITY_MA = 15.0
 EMS_MAX_DURATION_MS  = 3000
@@ -104,13 +105,13 @@ async def fire_haptic(pattern: str, reason: str, intensity: float = 0.5,
 @mcp.tool()
 async def fire_ems(channel: str, intensity_ma: float, duration_ms: int,
                    frequency_hz: float, reason: str) -> str:
-    """Fire an EMS (electrical muscle stimulation) pulse on a specific muscle channel.
+    """Fire an EMS pulse on a specific muscle channel.
 
-    Safety limits are enforced in hardware and cannot be overridden.
-    Costs 3 attention budget points (use sparingly).
+    Always call read_emg first — skip EMS if user is already actively contracting.
+    Costs 3 attention budget points.
 
     Args:
-        channel: "rhomboid_l", "rhomboid_r", "lumbar_erector_l", "lumbar_erector_r"
+        channel: "rhomboid_l", "rhomboid_r", "lumbar_erector"
         intensity_ma: Current in milliamps. Hard cap: 15.0 mA.
         duration_ms: Pulse duration. Hard cap: 3000 ms.
         frequency_hz: Stimulation frequency. Range: 20–80 Hz.
@@ -118,12 +119,10 @@ async def fire_ems(channel: str, intensity_ma: float, duration_ms: int,
     """
     EMSChannel(channel)
 
-    # Hard safety caps
     intensity_ma = min(intensity_ma, EMS_MAX_INTENSITY_MA)
     duration_ms  = min(duration_ms,  EMS_MAX_DURATION_MS)
     frequency_hz = max(20.0, min(frequency_hz, 80.0))
 
-    # Cooldown check per channel
     elapsed = time.time() - _ems_last_fire.get(channel, 0.0)
     if elapsed < EMS_COOLDOWN_S:
         return json.dumps({"fired": False, "reason": "cooldown",
@@ -155,6 +154,21 @@ async def fire_ems(channel: str, intensity_ma: float, duration_ms: int,
     })
 
 
+@mcp.tool()
+async def read_emg(channel: str = "upper_back") -> str:
+    """Read the latest EMG signal from the muscle sensor.
+
+    Returns signal strength and whether the muscle is actively contracting.
+    Use this during escalation to check if the user is actively correcting posture.
+
+    Args:
+        channel: EMG channel to read — currently only "upper_back"
+    """
+    EMGChannel(channel)
+    return json.dumps(_last_emg or {"channel": channel, "signal_mv": 0.0,
+                                    "is_active": False, "note": "no EMG data yet"})
+
+
 # ---------------------------------------------------------------------------
 # MCP Tools — budget management (for brain/planner agent)
 # ---------------------------------------------------------------------------
@@ -164,7 +178,7 @@ async def get_attention_budget() -> str:
     """Return the current attention budget for this device.
 
     Budget limits total daily actuator use to prevent habituation.
-    Haptic costs 1 point; EMS costs 3 points.
+    Haptic costs 1 point; EMG biofeedback costs 1 point.
     """
     return json.dumps(_attention_budget)
 
@@ -199,6 +213,12 @@ def resource_last_ems() -> str:
     return json.dumps(_last_ems or {"fired": False, "note": "no EMS yet"})
 
 
+@mcp.resource("device://kinesess/last_emg")
+def resource_last_emg() -> str:
+    """Most recent EMG reading from the muscle sensor."""
+    return json.dumps(_last_emg or {"signal_mv": 0.0, "is_active": False, "note": "no EMG data yet"})
+
+
 @mcp.resource("device://kinesess/attention_budget")
 def resource_attention_budget() -> str:
     """Current attention budget state."""
@@ -219,6 +239,7 @@ def resource_status() -> str:
         "ems_cooldowns_remaining_s": ems_cooldowns,
         "last_haptic": _last_haptic or None,
         "last_ems": _last_ems or None,
+        "last_emg": _last_emg or None,
     })
 
 

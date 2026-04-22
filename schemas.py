@@ -27,25 +27,11 @@ class PostureClass(Enum):
 
 
 class SceneType(Enum):
-    # Work
-    DESK_WORK = "desk_work"       # seated, facing screen
-    STANDING_DESK = "standing_desk"  # standing, working
-    MEETING = "meeting"           # multi-person meeting room
-    PRESENTING = "presenting"     # standing, presenting/lecturing
-    # Movement
-    WALKING = "walking"           # on foot
-    COMMUTING = "commuting"       # in transit (subway/bus/car)
-    EXERCISE = "exercise"         # gym, sport, workout
-    # Rest & personal
-    RESTING = "resting"           # sofa, lounge, lying back
-    EATING = "eating"             # meal time
-    READING = "reading"           # book or phone reading
-    # Social
-    SOCIAL_CASUAL = "social_casual"   # informal chat
-    SOCIAL_DINING = "social_dining"   # group meal
-    # Outdoor
-    OUTDOOR = "outdoor"           # outside environment
-    # Fallback
+    DESK = "desk"
+    MEETING = "meeting"
+    WALKING = "walking"
+    STANDING = "standing"
+    SOCIAL = "social"
     UNKNOWN = "unknown"
 
 
@@ -69,11 +55,14 @@ class VibrationZone(str, Enum):
     LUMBAR_R   = "lumbar_r"     # lower back right
 
 
+class EMGChannel(str, Enum):
+    UPPER_BACK = "upper_back"  # rhomboid/trapezius area — detects active scapular retraction
+
+
 class EMSChannel(str, Enum):
-    RHOMBOID_L       = "rhomboid_l"        # left rhomboid → retract left scapula
-    RHOMBOID_R       = "rhomboid_r"        # right rhomboid → retract right scapula
-    LUMBAR_ERECTOR_L = "lumbar_erector_l"  # left lumbar erector → extend lumbar
-    LUMBAR_ERECTOR_R = "lumbar_erector_r"  # right lumbar erector → extend lumbar
+    RHOMBOID_L     = "rhomboid_l"      # left rhomboid → retract left scapula
+    RHOMBOID_R     = "rhomboid_r"      # right rhomboid → retract right scapula
+    LUMBAR_ERECTOR = "lumbar_erector"  # center lumbar erector → extend lower back
 
 
 class HapticPattern(str, Enum):
@@ -314,6 +303,32 @@ class HapticCommand:
             reason=d["reason"],
             intensity=d["intensity"],
             zone=VibrationZone(d["zone"]) if d.get("zone") else None,
+            timestamp=d.get("timestamp", time.time()),
+        )
+
+
+@dataclass
+class EMGReading:
+    """Raw EMG reading from the muscle sensor module."""
+    channel: EMGChannel
+    signal_mv: float        # millivolts, rectified amplitude
+    is_active: bool         # True when signal exceeds contraction threshold
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "channel": self.channel.value,
+            "signal_mv": self.signal_mv,
+            "is_active": self.is_active,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> EMGReading:
+        return cls(
+            channel=EMGChannel(d["channel"]),
+            signal_mv=d["signal_mv"],
+            is_active=d["is_active"],
             timestamp=d.get("timestamp", time.time()),
         )
 
