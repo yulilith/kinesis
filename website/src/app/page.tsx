@@ -5,6 +5,7 @@ import WhyMultiAgent from "../components/landing/WhyMultiAgent";
 import Architecture from "../components/landing/Architecture";
 import Hardware from "../components/landing/Hardware";
 import DashboardDemo from "../components/dashboard/DashboardDemo";
+import Network from "../components/landing/Network";
 import TryKinesis from "../components/landing/TryKinesis";
 
 export default function Home() {
@@ -18,6 +19,7 @@ export default function Home() {
         <Architecture />
         <Hardware />
         <DashboardDemo />
+        <Network />
         <TryKinesis />
 
         {/* Video Demo */}

@@ -16,7 +16,9 @@ export default function Hero() {
             KINESIS
           </h1>
           <p className="text-lg md:text-xl font-extralight text-black/70 max-w-xl mx-auto leading-relaxed tracking-wide">
-            A multi-agent embodied AI system for adaptive posture correction
+            A multi-agent embodied AI system for adaptive posture correction —
+            and a network where every user&apos;s health agent learns from the
+            others.
           </p>
           <div className="mt-12 flex items-center justify-center gap-3 flex-wrap">
             <a
