@@ -1,46 +1,87 @@
-# Kinesis 🦞
+# Kinesis
 
-AI-powered posture monitoring system using ESP32 wearable sensors and a multi-agent Claude backend.
+**An agentic solution for personalized posture correction**
 
-## Overview
+context-aware | adaptive | closed-loop
 
-Kinesis is a wearable posture correction system that continuously monitors your body position and environment, then delivers gentle haptic or EMS feedback to guide you back into alignment — without interrupting your focus.
+Team: Chloe Ni, Lilith Yu, Nomy Yu — MAS.664 AI Studio
 
-The system consists of three Claude-powered agents coordinating through a shared state server (MCP blackboard), plus a real-time web dashboard.
+---
+
+## The Problem
+
+Posture isn't a sensing problem. It's a **decision problem**.
+
+| # | Dimension | Why it matters |
+|---|-----------|----------------|
+| 01 | **Body State** | Muscle fatigue and tension shift what "good posture" means hour to hour |
+| 02 | **Activity** | Typing, lifting, walking — each demands a different baseline |
+| 03 | **Context** | A buzz mid-meeting is noise; the same buzz at the desk is a useful nudge |
+| 04 | **History** | What worked yesterday can adapt away. Habits drift; feedback must drift with them |
+
+## Our Solution
+
+Kinesis is a multi-agent wearable that turns posture correction into a closed loop — embodied, contextual, and personalized.
+
+- **Embodied sensing** — IMU + EMG, head to back
+- **Context awareness** — activity and surroundings, in real time
+- **Adaptive decisions** — three agents, one orchestrated strategy
+- **Closed-loop intervention** — haptic + audio feedback, calibrated per moment
+
+## System Architecture
 
 ```
-ESP32 (IMU + vibration/EMS)
+                    CONTEXT AGENT
+                    (AI Glasses)
+                 Activity, surroundings,
+                   interruptibility
+                         │
+                      context
+                         │
+COACH AGENT ◄────────── USER ──────────► EXTERNAL MCPs
+(Orchestrator)         human              Whoop, Oura, etc.
+Long memory,        embodied I/O         Recovery, strain,
+strategy across                           readiness [optional]
+hours/days/weeks
+        ▲
         │
-        ▼
-┌───────────────────────────────────────────┐
-│           Shared State Server             │  ← MCP blackboard + dashboard host
-│               :8080                       │
-└──────┬──────────────┬──────────────┬──────┘
-       │              │              │
-  Body Agent    Context Agent   Brain Agent
- (posture/EMS)  (scene/camera)  (strategy)
+  BODY AGENT
+  (Kinesis Wearable)
+  IMU x2 (spinal deviation)
+  EMG x3 (muscle response)
+  Vibration x4 | ESP32
 ```
+
+The Coach Agent orchestrates personal agents and external data sources, using each one's signal where it's strongest. Hardware stays close to the body; reasoning stays close to the context.
 
 ## Agents
 
-| Agent | Role | Loop |
-|-------|------|------|
-| **Body Agent** | Reads IMU sensors, classifies posture, triggers vibration/EMS | 500ms |
-| **Context Agent** | Reads camera/glasses, classifies scene (desk/meeting/walking) | 2s |
-| **Brain Agent** | Observes patterns across time, adjusts intervention strategy | 30s |
+| Agent | Role | Signal |
+|-------|------|--------|
+| **Body Agent** | Reads spinal alignment from IMUs and muscle response from EMG. Knows the difference between bad posture and a fatigued one. | What is the body doing right now? Did the last intervention actually engage muscle? |
+| **Context Agent** | Classifies activity and surroundings — focused work, meeting, walking — so intervention fits the social and physical moment. | Is this an interruptible moment? What's the user actually trying to do? |
+| **Coach Agent** | Orchestrates body + context with history and external biometrics. Decides strategy across hours, days, and weeks. | Is this strategy still working? What pattern is forming over time? |
 
-Agents communicate with each other via a discussion channel on the shared state server — e.g. the body agent can ask the context agent "is the user in a meeting?" before deciding whether to intervene.
+## The Closed Loop
+
+Each cycle teaches the next one.
+
+```
+SENSE → INTERPRET → DECIDE → INTERVENE → MEASURE → ADAPT
+  │          │          │          │          │         │
+IMU+EMG   Body Agent  Coach     Haptic cue  EMG      Strategy
+capture   reads dev-  weighs    tuned to    verifies  updates
+posture   iation and  context,  the moment. muscle    for the
+& muscle  fatigue     history,              responded. cycle.
+signal              biometrics
+```
 
 ## Hardware
 
-- **ESP32** — microcontroller streaming IMU data over serial/BLE
-- **IMU sensors** — upper back (T3–T6) and lower back (L2–L4)
-- **Vibration motors** — 4 zones: left/right shoulder, left/right lumbar
-- **EMS channels** — rhomboid L/R, lumbar erector L/R
-
-## Dashboard
-
-Live dashboard served at **http://localhost:8080** — shows posture state, scene context, agent discussions, and intervention history.
+- **ESP32** — microcontroller streaming IMU + EMG data
+- **IMU x2** — spinal deviation (upper + lower back)
+- **EMG x3** — muscle response sensing
+- **Vibration motors x4** — haptic feedback zones
 
 ## Quickstart
 
@@ -62,7 +103,7 @@ python run.py
 open http://localhost:8080
 ```
 
-## Mock Replay (Week 7 datasets)
+## Mock Replay
 
 Run the system against pre-recorded 5-minute sessions without any hardware:
 
@@ -83,13 +124,13 @@ Generate new mock datasets:
 python generate_mock_replay.py
 ```
 
-## Run components separately
+## Run Components Separately
 
 ```bash
 python shared_state_server.py    # Terminal 1 — blackboard + dashboard
 python agents/context_agent.py   # Terminal 2 — glasses/scene
-python agents/body_agent.py      # Terminal 3 — posture/EMS
-python agents/brain_agent.py     # Terminal 4 — planner
+python agents/body_agent.py      # Terminal 3 — posture/EMG
+python agents/coach_agent.py     # Terminal 4 — strategy/long memory
 ```
 
 ## Project Structure
@@ -97,12 +138,12 @@ python agents/brain_agent.py     # Terminal 4 — planner
 ```
 kinesis/
 ├── agents/
-│   ├── body_agent.py        # Posture + EMS agent
+│   ├── body_agent.py        # Posture + EMG agent
 │   ├── context_agent.py     # Scene/glasses agent
-│   └── brain_agent.py       # Planner agent
+│   └── coach_agent.py       # Orchestrator/planner agent
 ├── body-agent/
 │   ├── firmware/            # ESP32 Arduino code
-│   └── python/              # IMU feature extraction
+│   └── python/              # IMU + EMG feature extraction
 ├── context-agent/           # Camera + CLIP scene classifier
 ├── esp32_agent/             # ESP32 firmware (esp32_agent.ino)
 ├── ble/                     # BLE + mock sensor layer
@@ -120,5 +161,6 @@ kinesis/
 
 - Python 3.11+
 - Anthropic API key
-- For real hardware: ESP32 with IMU + vibration/EMS hardware
+- For real hardware: ESP32 with IMU + EMG + vibration hardware
 - For camera mode: webcam + `torch`, `transformers`, `opencv-python`
+- For biometrics: Whoop or Oura API credentials (optional)
