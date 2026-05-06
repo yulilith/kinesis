@@ -694,7 +694,7 @@ function SystemLogCard({
   }, [log]);
 
   return (
-    <CardShell className="flex flex-col">
+    <CardShell className="flex flex-col overflow-hidden">
       <div className="flex items-start justify-between mb-1">
         <div>
           <h3 className="font-normal text-base tracking-wide">System Log</h3>
@@ -709,7 +709,7 @@ function SystemLogCard({
       </div>
       <div
         ref={ref}
-        className="flex-1 mt-4 overflow-y-auto text-xs space-y-2 font-mono min-h-[420px] max-h-[640px]"
+        className="flex-1 mt-4 overflow-y-auto overflow-x-hidden text-xs space-y-2 font-mono min-h-[420px] max-h-[640px]"
       >
         {log.length === 0 && (
           <p className="text-muted italic font-light">
@@ -719,20 +719,22 @@ function SystemLogCard({
         {log.map((e) => (
           <div
             key={e.id}
-            className="flex flex-col gap-0.5 leading-relaxed border-b border-surface/50 pb-2"
+            className="flex flex-col gap-0.5 leading-relaxed border-b border-surface/50 pb-2 min-w-0"
           >
-            <div className="flex gap-2">
+            <div className="flex gap-2 min-w-0">
               <span className="text-muted shrink-0">
                 {new Date(e.timestamp).toLocaleTimeString()}
               </span>
               <span className={`font-semibold shrink-0 ${levelColor(e.level)}`}>
                 [{e.agent ?? e.source}]
               </span>
-              <span className="text-foreground/80">{e.message}</span>
+              <span className="text-foreground/80 min-w-0 break-words">
+                {e.message}
+              </span>
             </div>
             {e.detail && (
-              <div className="pl-[7.5em] text-[10px] text-muted whitespace-pre-wrap break-all">
-                {e.detail}
+              <div className="pl-2 sm:pl-[7.5em] text-[10px] text-muted whitespace-pre-wrap break-words line-clamp-6 min-w-0">
+                {stripMdHeadings(e.detail)}
               </div>
             )}
           </div>
@@ -740,6 +742,10 @@ function SystemLogCard({
       </div>
     </CardShell>
   );
+}
+
+function stripMdHeadings(s: string): string {
+  return s.replace(/^\s*#{1,6}\s+/gm, "");
 }
 
 function levelColor(level: LogEntry["level"]) {

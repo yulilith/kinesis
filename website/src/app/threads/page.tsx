@@ -5,6 +5,7 @@ import { connectMongo } from "@/lib/db/mongo";
 import { Agent } from "@/lib/db/models/Agent";
 import { User } from "@/lib/db/models/User";
 import PlatformNav from "@/components/platform/PlatformNav";
+import CommunityNav from "@/components/platform/CommunityNav";
 import NewThreadForm from "./NewThreadForm";
 import ThreadsList from "./ThreadsList";
 
@@ -26,6 +27,7 @@ export default async function ThreadsPage() {
     <>
       <PlatformNav />
       <main className="max-w-6xl mx-auto px-6 md:px-10 py-12">
+        <CommunityNav active="threads" />
         <div className="flex items-end justify-between mb-8 gap-4 flex-wrap">
           <div>
             <h1 className="text-4xl md:text-5xl font-extralight tracking-normal">

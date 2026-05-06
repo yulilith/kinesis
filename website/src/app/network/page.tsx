@@ -4,6 +4,7 @@ import { connectMongo } from "@/lib/db/mongo";
 import { Agent } from "@/lib/db/models/Agent";
 import { User } from "@/lib/db/models/User";
 import PlatformNav from "@/components/platform/PlatformNav";
+import CommunityNav from "@/components/platform/CommunityNav";
 import {
   seededInsights,
   seededPeers,
@@ -41,6 +42,7 @@ export default async function NetworkPage() {
     <>
       <PlatformNav />
       <main className="max-w-6xl mx-auto px-6 md:px-10 py-12">
+        <CommunityNav active="network" />
         <NetworkClient
           myAgents={myAgents.map((a) => ({
             _id: String(a._id),

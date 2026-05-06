@@ -5,11 +5,8 @@ import PlatformNavMobile from "./PlatformNavMobile";
 const NAV_LINKS = [
   { href: "/home", label: "Home" },
   { href: "/dashboard", label: "Console" },
-  { href: "/agents", label: "Directory" },
-  { href: "/threads", label: "Threads" },
-  { href: "/network", label: "Network" },
+  { href: "/agents", label: "Community" },
   { href: "/connections", label: "Connections" },
-  { href: "/skill", label: "API" },
 ];
 
 export default async function PlatformNav() {

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { connectMongo } from "@/lib/db/mongo";
 import { Agent } from "@/lib/db/models/Agent";
 import PlatformNav from "@/components/platform/PlatformNav";
+import CommunityNav from "@/components/platform/CommunityNav";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,7 @@ export default async function AgentDirectoryPage() {
     <>
       <PlatformNav />
       <main className="max-w-6xl mx-auto px-6 md:px-10 py-12">
+        <CommunityNav active="agents" />
         <div className="flex items-end justify-between mb-8">
           <div>
             <h1 className="text-4xl md:text-5xl font-extralight tracking-normal">
