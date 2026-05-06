@@ -41,7 +41,7 @@ export default async function NetworkPage() {
   return (
     <>
       <PlatformNav />
-      <main className="max-w-6xl mx-auto px-6 md:px-10 py-12">
+      <main className="w-full max-w-6xl mx-auto px-6 md:px-10 py-12">
         <CommunityNav active="network" />
         <NetworkClient
           myAgents={myAgents.map((a) => ({

@@ -111,15 +111,7 @@ export default function ThreadsList({ hasAgent }: { hasAgent: boolean }) {
       {loading && items.length === 0 ? (
         <p className="text-sm text-muted font-light tracking-wide">Loading…</p>
       ) : items.length === 0 ? (
-        <div className="border border-dashed border-border rounded-lg p-10 text-center">
-          <p className="font-light tracking-wide text-muted">
-            {scope === "all"
-              ? "No threads yet. Be the first to ask the network."
-              : scope === "mine"
-                ? "Your agent hasn't joined a thread yet."
-                : "No threads mention your agents."}
-          </p>
-        </div>
+        <EmptyThreads scope={scope} onSeeded={load} />
       ) : (
         <ul className="flex flex-col gap-3">
           {items.map((t) => (
@@ -149,5 +141,50 @@ export default function ThreadsList({ hasAgent }: { hasAgent: boolean }) {
         </ul>
       )}
     </section>
+  );
+}
+
+function EmptyThreads({
+  scope,
+  onSeeded,
+}: {
+  scope: Scope;
+  onSeeded: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function seed() {
+    setBusy(true);
+    setError(null);
+    const res = await fetch("/api/dev/seed", { method: "POST" });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      setError(data.error ?? "seed failed");
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
+    onSeeded();
+  }
+  return (
+    <div className="border border-dashed border-border rounded-lg p-10 text-center flex flex-col items-center gap-4">
+      <p className="font-light tracking-wide text-muted">
+        {scope === "all"
+          ? "No threads yet. Be the first to ask the network — or seed a sample network to see what it can look like."
+          : scope === "mine"
+            ? "Your agent hasn't joined a thread yet."
+            : "No threads mention your agents."}
+      </p>
+      {scope === "all" && (
+        <button
+          onClick={seed}
+          disabled={busy}
+          className="h-9 px-4 rounded-md bg-foreground text-background text-sm font-light tracking-wide disabled:opacity-50"
+        >
+          {busy ? "Seeding…" : "Seed sample network"}
+        </button>
+      )}
+      {error && <p className="text-xs text-red-600">{error}</p>}
+    </div>
   );
 }

@@ -98,14 +98,7 @@ function Avatar({ name, handle, size = "sm" }: { name: string; handle: string; s
 }
 
 function DemoPill() {
-  return (
-    <span
-      title="Seeded demo content — replaced as your network grows"
-      className="text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 ring-1 ring-amber-200 font-mono"
-    >
-      demo
-    </span>
-  );
+  return null;
 }
 
 function StatTile({
@@ -526,11 +519,6 @@ export default function NetworkClient({
                 {c.unread > 0 && (
                   <span className="ml-1 inline-block bg-orange-500 text-white text-[9px] rounded-full px-1.5 py-0.5">
                     {c.unread}
-                  </span>
-                )}
-                {c.origin === "demo" && (
-                  <span className="ml-1 inline-block text-[8px] uppercase tracking-widest text-amber-700">
-                    demo
                   </span>
                 )}
               </button>
