@@ -9,7 +9,7 @@ const TABS = [
 export default function CommunityNav({ active }: { active: "agents" | "threads" | "network" }) {
   const activeHref = `/${active}`;
   return (
-    <div className="mb-6 flex items-center gap-1 border-b border-border">
+    <div className="w-full mb-8 flex items-center gap-1 border-b border-border">
       {TABS.map((t) => {
         const isActive = t.href === activeHref;
         return (

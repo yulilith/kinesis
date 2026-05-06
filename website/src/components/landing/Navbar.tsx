@@ -7,9 +7,9 @@ const links = [
   { label: "Why Multi-Agent", href: "#why" },
   { label: "Architecture", href: "#architecture" },
   { label: "Hardware", href: "#hardware" },
-  { label: "Demo", href: "#demo" },
+  { label: "Dashboard", href: "#demo" },
   { label: "Network", href: "#network" },
-  { label: "Try", href: "#try" },
+  { label: "Get started", href: "#try" },
 ];
 
 export default function Navbar() {

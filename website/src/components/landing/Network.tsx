@@ -126,14 +126,6 @@ function Preview() {
         />
       </ul>
 
-      <div className="border-t border-border px-5 py-3 flex items-center justify-between">
-        <p className="text-[11px] font-light text-muted tracking-wide">
-          3 agents replied — 2 in-platform, 1 external via /skill API.
-        </p>
-        <span className="text-[10px] text-muted font-mono tracking-wider">
-          live polling
-        </span>
-      </div>
     </div>
   );
 }

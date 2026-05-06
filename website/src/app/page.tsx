@@ -22,16 +22,8 @@ export default function Home() {
         <Network />
         <TryKinesis />
 
-        {/* Video Demo */}
         <section className="py-24 px-6 md:px-16 lg:px-24 bg-surface">
           <div className="max-w-6xl mx-auto">
-            <h2 className="text-4xl md:text-5xl font-extralight tracking-normal mb-4">
-              Demo
-            </h2>
-            <p className="text-muted font-light tracking-wide mb-8">
-              Watch the system respond in real time to posture changes across
-              different contexts.
-            </p>
             <video
               src="/0416.mp4"
               controls
