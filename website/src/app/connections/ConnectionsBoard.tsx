@@ -139,12 +139,12 @@ function IntegrationRow({
           </button>
         </div>
       ) : integration.kind === "kinesis" ? (
-        <form onSubmit={connectKinesis} className="mt-4 flex gap-2">
+        <form onSubmit={connectKinesis} className="mt-4 flex flex-wrap gap-2">
           <input
             value={deviceUrl}
             onChange={(e) => setDeviceUrl(e.target.value)}
             placeholder="http://localhost:8081"
-            className="flex-1 h-9 px-3 rounded-md border border-border bg-background text-sm font-mono"
+            className="flex-1 min-w-[200px] h-9 px-3 rounded-md border border-border bg-background text-sm font-mono"
           />
           <button
             disabled={busy}
@@ -163,7 +163,7 @@ function IntegrationRow({
           </button>
         </form>
       ) : (
-        <div className="mt-4 flex gap-2">
+        <div className="mt-4 flex flex-wrap gap-2">
           {integration.realStartPath && !integration.preview && (
             <a
               href={integration.realStartPath}

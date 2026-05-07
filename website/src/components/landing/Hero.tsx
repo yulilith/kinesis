@@ -12,10 +12,10 @@ export default function Hero() {
       {/* Content — dead center of viewport */}
       <div className="absolute inset-0 flex items-center justify-center z-10">
         <div className="text-center">
-          <h1 className="text-9xl md:text-[12rem] font-extralight leading-none mb-6 text-black/90" style={{ letterSpacing: "-0.06em" }}>
+          <h1 className="text-6xl sm:text-8xl md:text-[12rem] font-extralight leading-none mb-6 text-black/90" style={{ letterSpacing: "-0.06em" }}>
             KINESIS
           </h1>
-          <p className="text-lg md:text-xl font-extralight text-black/70 max-w-xl mx-auto leading-relaxed tracking-wide">
+          <p className="text-base sm:text-lg md:text-xl font-extralight text-black/70 max-w-xl mx-auto leading-relaxed tracking-wide px-4">
             A multi-agent embodied AI system for adaptive posture correction —
             and a network where every user&apos;s health agent learns from the
             others.

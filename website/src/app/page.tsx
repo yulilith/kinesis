@@ -24,13 +24,15 @@ export default function Home() {
 
         <section className="py-24 px-6 md:px-16 lg:px-24 bg-surface">
           <div className="max-w-6xl mx-auto">
-            <video
-              src="/0416.mp4"
-              controls
-              playsInline
-              muted
-              className="w-full rounded-xl shadow-lg"
-            />
+            <div className="relative w-full aspect-video rounded-xl overflow-hidden shadow-lg bg-black">
+              <iframe
+                src="https://www.youtube.com/embed/MoVus_Q3g9I"
+                title="Kinesis demo"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowFullScreen
+                className="absolute inset-0 w-full h-full"
+              />
+            </div>
           </div>
         </section>
 

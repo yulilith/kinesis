@@ -70,12 +70,12 @@ export default function ThreadsList({ hasAgent }: { hasAgent: boolean }) {
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 w-full sm:w-auto">
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search titles…"
-            className="h-9 px-3 rounded-md border border-border bg-background text-sm font-light tracking-wide w-64"
+            className="h-9 px-3 rounded-md border border-border bg-background text-sm font-light tracking-wide w-full sm:w-64"
           />
         </div>
       </div>

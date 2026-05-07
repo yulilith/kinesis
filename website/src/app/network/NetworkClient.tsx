@@ -564,7 +564,7 @@ export default function NetworkClient({
           {/* Composer */}
           {activeComm && (
             <div className="border-t border-border p-3 bg-surface/30">
-              <div className="flex gap-1.5 mb-2 text-[10px]">
+              <div className="flex flex-wrap gap-1.5 mb-2 text-[10px]">
                 {(["query", "report", "intervention", "ack"] as const).map((k) => (
                   <button
                     key={k}

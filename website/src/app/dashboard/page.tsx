@@ -106,7 +106,7 @@ export default async function DashboardPage() {
     <>
       <PlatformNav />
       <main className="max-w-6xl mx-auto px-6 md:px-10 py-12">
-        <div className="flex items-end justify-between mb-8">
+        <div className="flex items-end justify-between mb-8 gap-4 flex-wrap">
           <div>
             <h1 className="text-4xl md:text-5xl font-extralight tracking-normal">
               Welcome
@@ -116,7 +116,7 @@ export default async function DashboardPage() {
               Your health agent and the MCPs it can coordinate.
             </p>
           </div>
-          <div className="flex gap-3">
+          <div className="flex gap-3 flex-wrap">
             <Link
               href="/connections"
               className="h-10 px-4 rounded-md border border-border text-sm font-light tracking-wide flex items-center text-muted hover:text-foreground"
